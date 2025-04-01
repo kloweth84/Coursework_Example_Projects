@@ -1,0 +1,429 @@
+---
+title: "Final_Project_Text_Analysis"
+author: "Katharyn Loweth"
+date: "2024-11-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading packages:
+```{r}
+library(tm)
+library(NLP)
+library(tidyverse)
+library(stm)
+library(tokenizers)
+library(quanteda)
+library(kableExtra)
+
+library(rsvd)
+library(Rtsne)
+library(geometry)
+library(igraph)
+
+library(stmCorrViz)
+```
+
+Loading in data and initial processing of plot text
+```{r}
+
+movies = read.csv("movies_tagline_sentiment.csv")
+
+
+movieplot = movies %>% select(id, title, vote_average, revenue_budget_ratio, release_year, runtime, Oscar_nominee, imdb_plot, fps_pov_bin, sp_pov_bin, tps_pov_bin, fpp_pov_bin, tpp_pov_bin, anger_bin, fear_bin,sadness_bin,trust_bin, anticipation_bin,joy_bin,surprise_bin,disgust_bin)
+
+#text processor is making all words lowercase, removing numbers/punctuation, and stopwords
+#and stemming words
+processed <- textProcessor(movieplot$imdb_plot, metadata = movieplot)
+
+```
+
+looking at how varying the min_df for tokens changes corpus and dictionary
+```{r}
+
+
+plotRemoved(processed$documents, lower.thresh = seq(1, 30, by = 2))
+
+```
+
+
+setting min_df = 5 and prepping documents for STM
+```{r}
+
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta, lower.thresh = 5)
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+```
+
+
+
+searching for optimal K based on documents and vocab in sample
+```{r}
+set.seed(47)
+kResult <- searchK(out$documents, 
+                   out$vocab, 
+                   K= seq(5, 25), 
+                   prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+                   data=meta)
+
+#kResult <- searchK(out$documents, 
+#                   out$vocab, 
+#                   K= seq(5, 30,5), 
+#                   prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + #fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+#                   data=meta)
+
+
+```
+
+
+```{r}
+
+plot(kResult)
+
+
+```
+
+
+```{r}
+
+#mod.out <- selectModel(docs, vocab, K=8, prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + #tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin, 
+#                       data=meta, runs=20, seed = 47)
+#plotModels(mod.out)
+```
+
+```{r}
+
+#movietopics_2<-mod.out$runout[[3]]
+```
+
+
+
+```{r}
+
+movietopics_2 = stm(documents = out$documents, vocab = out$vocab, 
+    prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+    K = 10, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+
+```
+
+
+```{r}
+
+summary(movietopics_2)
+plot(movietopics_2, type="labels", width = 80)
+```
+
+```{r}
+library(wordcloud)
+cloud(movietopics_2, topic = 7, scale = c(4, 0.5), max.words = 30)
+
+
+```
+
+
+```{r}
+prep <- estimateEffect(1:10 ~ runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin, movietopics_2, meta=out$meta, 
+                       uncertainty="Global")
+
+summary(prep)
+```
+
+```{r}
+
+summary_effect <- summary(prep)
+
+
+effects_df <- do.call(rbind, lapply(1:length(summary_effect$tables), function(i) {
+  data.frame(
+    Topic = paste0("Topic ", i),
+    Term = rownames(summary_effect$tables[[i]]),
+    Estimate = summary_effect$tables[[i]][, "Estimate"],
+    Pvalue = summary_effect$tables[[i]][, "Pr(>|t|)"]
+  )
+}))
+
+effects_wide <- effects_df %>% pivot_wider(names_from = Topic, values_from = c(Estimate, Pvalue))
+
+
+effects_wide %>%
+  knitr::kable("latex", booktabs = TRUE, caption = "Estimated Effects by Topic") %>%
+  kable_styling(latex_options = c("hold_position", "striped"))
+```
+
+
+```{r}
+proportions = make.dt(model=movietopics_2, meta = meta)
+summarize_all(proportions, mean)
+```
+
+```{r}
+topicQuality(model=movietopics_2, documents=docs)
+
+```
+
+
+
+```{r}
+x = labelTopics(movietopics_2, topics = 1)
+x$prob
+
+topics <- data.frame(
+  Highest_Prob = (x$prob[1,]), 
+  Frequent_Exclusive = (x$frex[1,]))
+topics
+
+```
+
+
+
+
+```{r}
+
+#thought <- findThoughts(movietopics_2, texts = movieplot$imdb_plot, topics=1, n=3)
+for (i in seq(1,10)){
+  print(sprintf("Topic # %d", i))
+  topic = findThoughts(movietopics_2, texts = out$meta$title, n = 5, topics = i)
+  print(topic$docs[[1]])
+  plot(topic)
+}
+
+
+```
+
+```{r}
+
+mod.out.corr <- topicCorr(movietopics_2)
+plot(mod.out.corr)
+#mod.out.corr
+```
+
+```{r}
+
+exclusivity(movietopics_2)
+semanticCoherence(movietopics_2, out$documents)
+#stmCorrViz(movietopics_2, "stm-interactive-correlation.html", 
+#           documents_raw=movieplot$imdb_plot, documents_matrix=out$documents)
+```
+
+```{r}
+
+plot(movietopics_2, type="summary", n=5)
+
+plot(movietopics_2, type="labels", topics=c(3))
+```
+```{r}
+
+plot(movietopics_2, type="hist", topics = 2)
+```
+
+```{R}
+
+topic = findThoughts(movietopics_2, texts = out$meta$imdb_plot, n = 1, topics = 2)$docs[[1]]
+topic
+t = unlist(topic)
+title = findThoughts(movietopics_2, texts = out$meta$title, n = 1, topics = 2)$docs[[1]]
+unlist(title)
+
+plotQuote(t, width = 75, main = "Topic 2")
+```
+
+
+
+```{r}
+
+movieContent <- stm(out$documents, out$vocab, K = 8, ~release_year + runtime + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin, content =~ joy_bin, max.em.its = 75, data = out$meta, init.type = "Spectral")
+
+```
+
+
+```{r}
+
+plot(movieContent, type = "perspectives", topics = 7)
+
+```
+
+```{r}
+
+plot(prep, "release_year", method = "continuous", topics = 8, model = movietopics_2, xlab = "Film Release Year", main = "")
+
+```
+
+```{r}
+
+plot(prep, covariate = "joy_bin", topics = c(1, 2, 3,4,5, 6, 7, 8), model = movietopics_2, method = "difference", cov.value1 = 0, cov.value2 = 1)
+
+```
+
+```{r}
+
+library(tidystm)
+
+
+effect <- extract.estimateEffect(prep, "release_year", model = movietopics_2, method = "pointestimate", labeltype = "frex", n = 4)
+
+
+ggplot(effect, aes(x = covariate.value, y = estimate,
+                   ymin = ci.lower, ymax = ci.upper
+                   )) +
+  facet_wrap(~ label, nrow = 2) +
+  geom_ribbon(alpha = .5) +
+  geom_line() 
+
+
+ggplot(effect %>% filter(topic == 5), aes(x = covariate.value, y = estimate,
+                   ymin = ci.lower, ymax = ci.upper)) + geom_line(color = "blue") + geom_ribbon(alpha = .5, fill = "lightblue") + theme_minimal() + xlab("Film Release Year") + ylab("Expected Topic Proportion") + ggtitle(effect$label[effect$topic == 5])
+```
+
+
+```{r}
+library(LDAvis)
+#library(servr)
+toLDAvis(mod=movietopics_2, docs=out$documents)
+
+```
+
+
+```{r}
+theta <- movietopics_2$theta 
+
+topic_df <- data.frame()
+
+for (i in seq(1,8))
+ { 
+  topicnum <- i
+  topiccount <- sum(theta[,i] > 0.4)
+  topic_row = cbind(topicnum, topiccount)
+  topic_df = topic_df %>% rbind(topic_row)
+}
+
+dominant_topic <- apply(theta, 1, which.max)
+```
+
+```{r}
+
+plot.STM(movietopics_2, type = "summary", main = "title")
+
+```
+
+```{r}
+
+
+findingk_ver3.lee_mimno <- stm(documents = out$documents, 
+                                    vocab = out$vocab,
+                                    K = 0, # K=0 instructs STM to run Lee-Mimno
+                                    seed = 47, # randomness now, seed matters
+                                    prevalence =~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+                                    max.em.its = 75,
+                                    data = meta,
+                                    init.type = "Spectral",
+                                    verbose=TRUE
+    )
+
+plot(findingk_ver3.lee_mimno)
+```
+
+## using no metadata
+
+```{r}
+
+#mod.out.nometa <- selectModel(docs, vocab, K=8, 
+#                       data=meta, runs=20, seed = 47)
+#plotModels(mod.out.nometa)
+
+```
+
+```{r}
+
+#movietopics_nometa<-mod.out.nometa$runout[[1]]
+
+movietopics_nometa = stm(documents = out$documents, vocab = out$vocab, 
+    K = 8, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+
+```
+
+```{r}
+
+plot(movietopics_nometa, type="summary", xlim=c(0,.3))
+```
+
+```{r}
+
+topicQuality(model=movietopics_nometa, documents=docs)
+
+```
+```{r}
+
+mod.out.corr <- topicCorr(movietopics_nometa)
+plot(mod.out.corr)
+
+```
+
+```{r}
+
+theta_nometa <- movietopics_nometa$theta 
+topic_df_nometa <- data.frame()
+
+for (i in seq(1,8))
+ { 
+  topicnum <- i
+  topiccount <- sum(theta_nometa[,i] > 0.4)
+  topic_row = cbind(topicnum, topiccount)
+  topic_df_nometa = topic_df_nometa %>% rbind(topic_row)
+}
+
+dominant_topic_nometa <- apply(theta_nometa, 1, which.max)
+
+topic_df_nometa
+topic_df
+```
+
+
+## analysis of groupings
+
+```{r}
+
+movies_3 = meta %>% cbind(dominant_topic, dominant_topic_nometa)
+table(movies_3$dominant_topic)
+table(movies_3$dominant_topic_nometa)
+```
+
+
+```{r}
+
+ggplot(movies_3, aes(x=as.factor(dominant_topic), y=vote_average)) + geom_boxplot() +theme_minimal() + xlab("Topic Group") + ylab("Audience Vote Average") + ggtitle("Distribution of Average Audience Score, by Plot Topic Group")
+
+```
+
+
+```{r}
+
+ggplot(data = movies_3 %>% filter(revenue_budget_ratio <= 25), aes(x=as.factor(dominant_topic), y=revenue_budget_ratio)) + geom_boxplot(outlier.shape = NA) +theme_minimal() + xlab("Topic Group") + ylab("Revenue Budget Ratio") + ggtitle("Distribution of Revenue Budget Ratio, by Plot Topic Group") + coord_flip() + ylim(0,10)
+
+```
+
+
+
+```{r}
+
+ggplot(data = movies_3 %>% group_by(dominant_topic, Oscar_nominee) %>% summarise(count = n()), aes(x=as.factor(dominant_topic), y = count, fill = Oscar_nominee)) + geom_bar(position = "fill", stat = "identity") + theme_minimal() + xlab("Topic Group") + ylab("Oscar Nominee Proportion") + ggtitle("Distribution of Oscar Nominations, by Plot Topic Group")
+
+```
+
+```{r}
+
+for (i in seq(1,10)){
+  print(movies_3 %>% filter(dominant_topic == i) %>% select(title) %>% slice_head(n=10))
+}
+
+```
+
+```{r}
+
+movies_3 %>% filter(dominant_topic != dominant_topic_nometa) %>% select(title, dominant_topic, dominant_topic_nometa)
+
+```

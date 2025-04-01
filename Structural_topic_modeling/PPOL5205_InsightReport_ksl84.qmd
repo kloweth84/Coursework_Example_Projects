@@ -1,0 +1,696 @@
+---
+title: "Structural Topic Modeling (STM) of English-Language Movie Plots Using Quantitative and Qualitative Metadata - A Case Study"
+subtitle: "PPOL 5205 Insight Report"
+author: "Katharyn Loweth"
+editor: visual
+date: today
+date-format: 'MM.DD.YYYY'
+format: 
+  pdf:
+    documentclass: report
+    fontsize: "11pt"
+    linestretch: 1
+    keep-tex: true
+    geometry:
+      - top=30mm
+      - left=20mm
+      - right=20mm
+      - heightrounded
+execute: 
+  echo: false
+  warning: false
+---
+
+```{r}
+#| include: false 
+library(tm)
+library(NLP)
+library(tidyverse)
+library(stm)
+library(tokenizers)
+library(quanteda)
+library(rsvd)
+library(Rtsne)
+library(geometry)
+library(igraph)
+library(kableExtra)
+```
+
+```{r}
+movies = read.csv("movies_tagline_sentiment.csv")
+```
+
+## Summary
+
+This case study examines the use of both quantitative and qualitative topical prevalence covariates to inform a structural topic model of movie plot descriptions. Based on the results, these covariates help improve the model's performance and better identify topical prevalence within a document compared to models that do not include metadata.
+
+## Research Objective
+
+Movies are a key part of the American culture and economy. They are an art form that creates connection around the expression of humanity and a multibillion-dollar industry creating jobs and revenue nationwide. Movies permeate culture by appealing to the audience’s emotions through the film itself and the marketing around it.
+
+One aspect that can impact a movie’s success is how a movie studio markets a film. For example, movie taglines – short text typically 1-2 sentences (see image below for example) – are often the first glimpse of a movie for audiences. Movie studios intentionally and carefully craft these taglines to convey a sentiment or message that persuades audiences to see the movie (Bradley, 2020). The marketing exercise synthesizes the essence of a film in a few words and allows it to be taken as a representation of the overall film.
+
+In this case study, I want to explore how these carefully constructed short text features can be used to inform a structural topic model of longer texts (movie plots).
+
+Through this exploratory analysis, I hope to learn:
+
+-   What are the most common emotions and perspectives captured in movie taglines?
+
+-   Which topical prevalence covariates are significant for determining topical prevalence within a document?
+
+-   Which plot topics correlate with higher film success (as seen through audience ratings of the film, and the film's financial and critical success)?
+
+While my case study focuses on the film industry, this research could have broader implications in other industries, sectors, and policy. For example, researchers could utilize language included in legislative bill titles to inform topic modeling of the text in these bills. Previous usage of structural topic modeling approach has focused primarily on the use of quantitative or categorical features already existing in the dataset as topical prevalence covariates to inform the model (Roberts et al., 2019; Trajceski, 2021). This approach demonstrates that other types of metadata like short text features can also be ideal features to explore and include in text analysis.
+
+![Movie Poster for The Social Network (2010). Tagline "You don't get to 500 million friends without making a few enemies" is centered across actor's face.](images/SocialNetwork.jpg){fig-align="center" width="148"}
+
+## Data Sources
+
+The primary dataset used for this analysis comes from The Movie Database (TMDB), a community built database of more than 1 million movies whose information can be accessed using their API. The TMDB provides both metadata on the film, such as release date, but also data on TMDB user ratings of the film. I downloaded a CSV file from Kaggle containing information pulled from the TMDB API for 1,119,536 films ("Full TMDB Movies Dataset 2024", 2024).
+
+I filtered this dataset to focus on films that:
+
+-   Had movie taglines
+
+-   Were released after January 1, 1974.
+
+-   Original language was English.
+
+-   Budgets greater than \$1 million.
+
+-   Revenues greater than \$1 million.
+
+-   Average TMDB user vote score greater than 0.
+
+-   Had listed IMDB ids.
+
+Next, I used the IMDB id for each observation to pull a plot text description of the film from IMDB.com, another popular movie database forum. Upon review of the different movie text descriptions found online, I thought that IMDB provided the most consistent succinct yet detailed description of movie plot for the films in my dataset. I used the python package Cinemagoer to collect and append these plot descriptions to my dataframe (“Cinemagoer”, n.d.).
+
+Additionally, I added the following features to the dataset:
+
+-   I created a **revenue_budget_ratio** feature that compares the film's global revenue to its budget. This provides a better metric of the film's financial success and makes it easier to compare film financial success across the time period.
+
+-   I added a boolean variable **Oscar_nominee** that indicates whether the film was nominated for an Oscar in any category ("The Oscar Award", 2024).
+
+-   Based on a sentiment and perspective analysis of the taglines (described further under the techniques applied section), I created two sets of features that captured the use of words that communicated either an emotion or point of view. I have a set of features that captures the count of these words in the taglines, and another set of binary features that captures whether the emotion or point of view is present or not.
+
+After creating this new variables, I filtered out observations whose taglines did not include any words that communicated emotion or perspective. The final dataset prepared for analysis consisted of **4,239 films**.
+
+### Exploratory Analysis
+
+As part of my analysis, I examine how clusters of movies grouped by their dominant topic vary in the distribution of 3 different metrics of film success. I have provided descriptive plots/tables for these 3 metrics (2 numeric variables, 1 boolean variable). The average user vote score, which is on a scale of 0 to 10, suggests that many movies have scores around 6 (indicating an average film) and the scores are normally distributed. In contrast, the revenue-budget ratio is significantly skewed to the right, indicating that there are some observations with very high scores (box office hits) but most films make less than 5 times their budget. The Oscar nominee variable is unevenly represented in the data set, but that is expected considering only a small percentage of films are nominated every year.
+
+```{r}
+#| include: false 
+
+budget_rev_hist = ggplot(movies, aes(x = revenue_budget_ratio)) + geom_histogram(fill = "lightblue", color="black") + theme_minimal() + ggtitle("Plot 1A: Distribution of Film Revenue Budget Ratio") + xlab("Revenue Budget Ratio") 
+
+aud_score_hist = ggplot(movies, aes(x = vote_average)) + geom_histogram(fill = "lightblue", color="black") + theme_minimal() + ggtitle("Plot 1B: Distribution of Film Vote Average") + xlab("Film Vote Average (from TMDB users)") 
+```
+
+```{r}
+#| layout-ncol: 2
+
+budget_rev_hist
+aud_score_hist
+```
+
+| Films                                      | Count (%)    |
+|--------------------------------------------|--------------|
+| Number of Films Nominated for an Oscar     | 810 (19.1%)  |
+| Number of Films Not Nominated for an Oscar | 3429 (80.9%) |
+
+: Count of Oscar Nominee Films in Sample
+
+```{r}
+#| include: false
+
+
+english_stopwords = c('it', "it's", 'its', 'itself', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't")
+
+token_tagline = tokens(movies$tagline, remove_punct = TRUE, remove_symbols = TRUE, remove_numbers = TRUE) |> tokens_select(english_stopwords, selection = "remove", padding = FALSE) |> tokens_wordstem() |> dfm()
+
+
+top_n_tag = topfeatures(token_tagline, n = 20)
+
+#data.frame(Term = names(top_n_tag), Freq = top_n_tag, row.names = NULL)
+
+token_plot = tokens(movies$imdb_plot, remove_punct = TRUE, remove_symbols = TRUE, remove_numbers = TRUE) |> tokens_select(english_stopwords, selection = "remove", padding = FALSE) |> tokens_wordstem() |> dfm()
+
+top_n_plot = topfeatures(token_plot, n = 20)
+
+#data.frame(Term = names(top_n_plot), Freq = top_n_plot, row.names = NULL)
+```
+
+Table 1 includes the 15 most common words (removing common stopwords like "the") in both the movie taglines and movie plots. There are some similarities in the use of tokens across the two texts. Pronouns are highly frequent in both texts, although the use of second-person pronouns is only included in the tagline tokens. Additionally, the difference in token frequency between the two sources of text demonstrate that plot texts are significantly longer than the taglines.
+
++-----------------+---------------+--------------+------------+------------+
+| Token Freq Rank | Tagline Token | Tagline Freq | Plot Token | Plot Freq  |
++:===============:+:=============:+:============:+:==========:+:==========:+
+| 1               | you           | 724          | his        | 7084       |
++-----------------+---------------+--------------+------------+------------+
+| 2               | he            | 417          | he         | 5181       |
++-----------------+---------------+--------------+------------+------------+
+| 3               | one           | 353          | her        | 4168       |
++-----------------+---------------+--------------+------------+------------+
+| 4               | your          | 318          | they       | 2506       |
++-----------------+---------------+--------------+------------+------------+
+| 5               | love          | 298          | their      | 2496       |
++-----------------+---------------+--------------+------------+------------+
+| 6               | his           | 239          | she        | 2300       |
++-----------------+---------------+--------------+------------+------------+
+| 7               | they          | 237          | him        | 2013       |
++-----------------+---------------+--------------+------------+------------+
+| 8               | stori         | 187          | find       | 1387       |
++-----------------+---------------+--------------+------------+------------+
+| 9               | time          | 180          | one        | 1324       |
++-----------------+---------------+--------------+------------+------------+
+| 10              | get           | 179          | life       | 1276       |
++-----------------+---------------+--------------+------------+------------+
+| 11              | world         | 177          | get        | 1201       |
++-----------------+---------------+--------------+------------+------------+
+| 12              | never         | 168          | new        | 1118       |
++-----------------+---------------+--------------+------------+------------+
+| 13              | life          | 168          | friend     | 977        |
++-----------------+---------------+--------------+------------+------------+
+| 14              | man           | 160          | take       | 901        |
++-----------------+---------------+--------------+------------+------------+
+| 15              | she           | 157          | live       | 900        |
++-----------------+---------------+--------------+------------+------------+
+
+: 15 Most Common Unigram Tokens In Movie Taglines and Plot Descriptions
+
+## Techniques Applied
+
+The primary techniques that will be utilized for this project are (1) Sentiment Analysis of the movie taglines and (2) Structural Topic Modeling of the movie plots.
+
+### 1.) Sentiment and Perspective Analysis
+
+I assume that movie production companies are purposefully choosing words (i.e., love.) in their taglines to grab people’s interest so that they consider seeing the movie. Thus I think that word choice used in these taglines could provide meaningful insight into the film.
+
+-   [Sentiment Analysis.]{.underline} For the sentiment analysis I utilized the **NRC Word-Emotion Association Lexicon,** which assigns words within its dictionary to a particular emotion (anger, fear, sadness, trust, anticipation, joy, surprise, and disgust) or sentiment (positive and negative) (Mohammad, n.d.). For this analysis, I focused on the 8 specific emotions and excluded positive/negative words from the analysis. Using the NRC Word-Emotion Association Lexicon and the python package NRCLex, I created a dictionary that counted the number of tokens associated with the 8 different emotions in each tagline (Bailey, 2018). As can be seen in plot 2A, the most common sentiments are anticipation, fear, and trust.
+
+-   [Perspective Analysis]{.underline}. For the perspective analysis, I created 5 sets of pronouns based on English grammar rules: first person singular, first person plural, second person, third person singular, and third person plural (Ross, 2024). Like the sentiment analysis, I analyzed each movie tagline to determine whether they contained any words found in these 5 lists and created a dictionary that stored the number of tokens in the tagline associated with the 5 perspectives. As can be seen in plot 2B, words that communicate second person and third person singular are much more common than other perspectives.
+
+```{r}
+#| include: false 
+movies_emotion_reshaped = movies %>% pivot_longer(cols = c("anger", "fear", 'sadness', 'trust', 'anticipation', 'joy', 'surprise', 'disgust'), names_to = "Emotion", values_to = "Word_Count")
+  
+movies_perspective_reshaped = movies %>% pivot_longer(cols = c("fps_pov", "sp_pov", 'tps_pov', 'fpp_pov', 'tpp_pov'), names_to = "Perspective", values_to = "Word_Count") %>% mutate(Perspective = recode(Perspective, "fps_pov" = "First Person Singular (me)", "sp_pov" = "Second Person (you)", "tps_pov" = "Third Person Singular (she; him)", "fpp_pov" = "First Person Plural (we)", "tpp_pov" = "Third Person Plural (they)"))
+
+
+emotionplot = ggplot(movies_emotion_reshaped %>% group_by(Emotion) %>% summarise(Emotion_Count = sum(Word_Count)), aes(x=Emotion, y=Emotion_Count, fill = Emotion)) + geom_bar(stat = "identity", color = "black") + theme_minimal() + theme(legend.position = "none") + xlab("Emotion") + ylab("Count of Emotional Words") + ggtitle("Plot 2A: Count of Emotional Words in Movie Taglines, by Emotion")
+    
+    
+per_plot = ggplot(movies_perspective_reshaped %>% group_by(Perspective) %>% summarise(Per_Count = sum(Word_Count)), aes(x=str_wrap(Perspective, width = 12), y=Per_Count, fill =Perspective)) + geom_bar(stat = "identity", color = "black") + theme_minimal() + theme(legend.position = "none") + xlab("Point of View (POV), Grammatical Person") + ylab("Count of POV words") + ggtitle("Plot 2B: Count of Perspective Words in Movie Taglines, by POV")
+```
+
+```{r}
+#| layout-ncol: 2
+
+emotionplot
+per_plot
+```
+
+### 2.) Structural Topic Modeling (STM)
+
+Structural Topic Modeling (STM) like Latent Dirichlet Allocation (LDA), is a generative model of word counts. While LDA topic modeling uses hyperparameters to determine topic prevalence, STM allows for the use of document metadata to inform topic prevalence within a document (Roberts et al., 2019; Lebryk, 2021). This can also help improve the assignment of words to the topics within the corpus. Additionally, STM does not assume that topics are independent of one another and demonstrates possible correlation between topics (Roberts et al., 2019). Figure 2 is a visual of the structural topic model methodology, which demonstrates that the metadata is used to inform the theta parameter of the model (Lebryk, 2021).
+
+![Structural Topic Model Methodology (Lebryk, 2021)](PPOL5205_ProjectShowcase/www/STM_model_2.png){fig-align="center" width="340"}
+
+For the structural topic model, I chose to use the features **release_year**, **runtime**, and the binary versions of the **perspective** and **emotion variables** as topical prevalence covariates because I think that they could all inform the topical prevalence within a document.
+
+#### Selecting STM parameters
+
+I prep the corpus by converting all tokens to lowercase, removing numbers and punctuation tokens, removing stopwords, and stemming tokens. From this prep, three documents were removed from the corpus, making the document sample equal to 4,236. There are 21,316 unique terms and 210,709 tokens in the corpus. To reduce computational complexity of the model and reduce instances of rare or movie series specific words (ex. "Katniss" from the Hunger Games trilogy), I chose to set a min_df = 5, which reduced the total number of unique terms to 4,761 and number of overall tokens to 183,006.
+
+```{r}
+#| include: false 
+movieplot = movies %>% select(id, title, vote_average, revenue_budget_ratio, release_year, runtime, Oscar_nominee, imdb_plot, fps_pov_bin, sp_pov_bin, tps_pov_bin, fpp_pov_bin, tpp_pov_bin, anger_bin, fear_bin,sadness_bin,trust_bin, anticipation_bin,joy_bin,surprise_bin,disgust_bin)
+
+#text processor is making all words lowercase, removing numbers/punctuation, and stopwords
+#and stemming words
+processed <- textProcessor(movieplot$imdb_plot, metadata = movieplot)
+out <- prepDocuments(processed$documents, processed$vocab,processed$meta)
+
+
+```
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 9
+#| include: false
+
+plotRemoved(processed$documents, lower.thresh = seq(1, 30, by = 2))
+```
+
+```{r}
+#| include: false
+
+
+
+set.seed(47)
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta, lower.thresh = 5)
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+
+#kResult <- searchK(out$documents, 
+#                   out$vocab, 
+#                  K= seq(5, 25), 
+#                  prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+#                  data=meta)
+
+
+```
+
+To determine a suitable number of topics to include in the model, the STM package command searchK() allows for the comparison of different diagnostic values for the topic model at varying number of topics (K) (Bail, n.d.; Silge, 2018). Based on a model with topical prevalence informed by 13 parameters, K = 10 appears to be the most suitable. A K=10, the model has both relatively high held-out likelihood and semantic coherence and a low residual, which suggests a good fit (Silge, 2018). I also plotted the average exclusivity and semantic coherence for models with 7-11 topics, and K=10 had the highest combination of the two metrics.
+
+```{r}
+
+#png('searchK_result_plot.png')
+#plot(kResult)
+#dev.off()
+```
+
+![Diagnostic Plot For STM with varying number of topics (5-25)](searchK_result_plot.png){fig-align="center" width="390"}
+
+```{r}
+#| include: false
+
+sem_excl = setNames(data.frame(matrix(ncol = 3, nrow = 5)), c("numK", "SemCoh", "Excl"))
+k = c(7,8,9,10,11)
+
+for (i in seq(1,5)){
+  num_k = k[i]
+  m = stm(documents = out$documents, vocab = out$vocab, 
+    prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+    K = num_k, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+  avg_sc = mean(semanticCoherence(model = m, documents = docs))
+  avg_ex = mean(exclusivity(model = m))
+  sem_excl[i,1] = num_k
+  sem_excl[i,2] = avg_sc
+  sem_excl[i,3] = avg_ex
+}
+
+```
+
+```{r, fig.align='center'}
+#| fig-height: 3
+#| fig-width: 4
+
+
+ggplot(sem_excl, aes(x = SemCoh, y = Excl, label = numK)) + geom_text() + theme_minimal() + labs(title = "Plot 3: Comparison of Semantic Coherence and Exclusivity\nfor Varying Number of Topics", subtitle = "Structural Topic Model") + xlab("Average Semantic Coherence") + ylab("Average Exclusivity")
+```
+
+```{r}
+#| include: false 
+movietopics_2 = stm(documents = out$documents, vocab = out$vocab, 
+    prevalence=~runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin,
+    K = 10, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+
+
+```
+
+#### Evaluation of STM results
+
+While the model with 10 topics had the highest average combination of exclusivity and semantic coherence, Plot 4 shows that across the topics there is variation in these scores. Additionally, Plot 5 demonstrates significant correlation between topics. Topics 1 and 10 are the only topics not correlated with others. Correlation makes sense considering the texts and overlap between movie tropes and themes. The findings section will provide further context into the similarities and differences across topics.
+
+```{r, fig.align='center'}
+#| fig-height: 3
+#| fig-width: 5
+#topicQuality(model=movietopics_2, documents=docs)
+
+plot(x = semanticCoherence(model = movietopics_2, documents = docs), y = exclusivity(model = movietopics_2), xlab = "Semantic Coherence", ylab = "Exclusivity", main = "Plot 4: Semantic Coherence vs. Exclusivity \nSTM Results", col = "lightblue", pch = 19)
+
+```
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 4
+
+
+mod.out.corr <- topicCorr(movietopics_2)
+plot(mod.out.corr, main = "Plot 5: Topic Correlation for STM Model")
+
+```
+
+#### Validation of Results - Comparing Results against Model without metadata
+
+```{r}
+#| include: false
+
+
+#sem_excl_nometa = setNames(data.frame(matrix(ncol = 3, nrow = 5)), c("numK", "SemCoh", "Excl"))
+#k = c(7,8,9,10,11)
+
+#for (i in seq(1,5)){
+#  num_k = k[i]
+#  m = stm(documents = out$documents, vocab = out$vocab, 
+#    K = num_k, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+#  avg_sc = mean(semanticCoherence(model = m, documents = docs))
+#  avg_ex = mean(exclusivity(model = m))
+#  sem_excl_nometa[i,1] = num_k
+# sem_excl_nometa[i,2] = avg_sc
+#  sem_excl_nometa[i,3] = avg_ex
+#}
+
+#sem_excl_nometa
+```
+
+```{r, fig.align='center'}
+#|include: false
+#ggplot(sem_excl_nometa, aes(x = SemCoh, y = Excl, label = numK)) + geom_text() + theme_minimal() + xlab("Average Semantic Coherence") + ylab("Average Exclusivity") + labs(title = "Comparison of Semantic Coherence and Exclusivity\nfor Varying Number of Topics", subtitle = "No Metadata")
+```
+
+```{r}
+#| include: false
+movietopics_nometa = stm(documents = out$documents, vocab = out$vocab, 
+    K = 10, max.em.its = 75, data = out$meta, init.type = "Spectral", seed = 47)
+
+```
+
+To validate that the metadata is making our results more precise and efficient, I compare the results to a model with the same dataset and number of topics but without any metadata features included to inform prevalence. The STM command defaults to a correlated topic model (similar to LDA but allows for topics to be correlated with one another) (Roberts et al., 2019). The correlated topic model identified the same general topics and most defining words as the structural topic model. However, the STM has better metrics than the correlated topic model. The STM has an average semantic coherence of `r mean(semanticCoherence(movietopics_2, documents = docs))` and exclusivity of `r mean(exclusivity(movietopics_2))` whereas the correlated topic model has an average semantic coherence of `r mean(semanticCoherence(movietopics_nometa, documents = docs))` and exclusivity of `r mean(exclusivity(movietopics_nometa))`. Additionally, the STM was able to identify more correlations between topics than the model without metadata. Thus, the use of metadata has improved the model’s performance and interpretability.
+
+```{r, fig.align = "center"}
+#| fig-height: 4
+#| fig-width: 7
+#| include: false
+
+
+plot(movietopics_nometa, type="summary", n=5, main = "Topics without Metadata")
+```
+
+```{r, fig.align='center'}
+#| fig-height: 3
+#| fig-width: 5
+
+#topicQuality(model=movietopics_nometa, documents=docs)
+plot(x = semanticCoherence(model = movietopics_nometa, documents = docs), y = exclusivity(model = movietopics_nometa), xlab = "Semantic Coherence", ylab = "Exclusivity", main = "Plot 6: Semantic Coherence vs. Exclusivity \nModel without Metadata", col = "lightblue", pch = 19)
+
+```
+
+```{r, fig.align = 'center'}
+#| fig-height: 4
+#| fig-width: 4
+
+mod.out.corr <- topicCorr(movietopics_nometa)
+plot(mod.out.corr, main = "Plot 7: Topic Correlation for Model without Metadata")
+
+```
+
+## Findings
+
+### Topics in Corpus
+
+Plots 8-9 highlight the differences in tokens and themes across the 10 topics. Many of the topics identified in the corpus relate to different genres of films or thematic tropes. For example, the defining words and films for Topic 2 all relate to action/war films, and the words and films for Topic 5 relate to films about crime/police. Other topics appear to include many different types of films. Interestingly, some of the most defining films for the family-focused topics (topic 3 and 7) are horror films (The Unborn and Insidious: Chapter 2). However, the plots of these films focus on a family.
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 8
+plot(movietopics_2, type="summary", n=5, main =  "Plot 8: Top Topics")
+```
+
+```{r, fig.align='center'}
+#| fig-height: 8
+#| fig-width: 8
+plot(movietopics_2, type="labels", width = 80, main = "Plot 9: Topic Defining Tokens")
+
+#for (i in seq(1,10)){
+#  print(sprintf("Topic # %d", i))
+#  topic = findThoughts(movietopics_2, texts = out$meta$title, n = 5, topics = i)
+#  print(topic$docs[[1]])
+#  plot(topic)
+#}
+```
+
++---------------+------------------------------+-------------------------------------------------------+
+| Topic \#      | Interpretation               | Films                                                 |
++:=============:+:============================:+:=====================================================:+
+| 1             | Adult Drama                  | -   The Book of Life                                  |
+|               |                              | -   Bohemian Rhapsody                                 |
+|               |                              | -   All Eyez on Me                                    |
+|               |                              | -   Stan & Ollie                                      |
+|               |                              | -   Reds                                              |
++---------------+------------------------------+-------------------------------------------------------+
+| 2             | Action                       | -   Star Trek: The Motion Picture                     |
+|               |                              | -   Iron Sky                                          |
+|               |                              | -   Valkyrie                                          |
+|               |                              | -   Stealth                                           |
+|               |                              | -   Ghost in the Shell                                |
++---------------+------------------------------+-------------------------------------------------------+
+| 3             | Family/Family Horror         | -   Annabelle: Creation                               |
+|               |                              | -   Forever My Girl                                   |
+|               |                              | -   The Unborn                                        |
+|               |                              | -   Miss Potter                                       |
+|               |                              | -   Father Figures                                    |
++---------------+------------------------------+-------------------------------------------------------+
+| 4             | Fantasy/Adventure/Journey    | -   Friday the 13th Part VII: The New Blood           |
+|               |                              | -   Rocky IV                                          |
+|               |                              | -   The Lord of the Rings: The Fellowship of the Ring |
+|               |                              | -   The Phantom                                       |
+|               |                              | -   Finding Nemo                                      |
++---------------+------------------------------+-------------------------------------------------------+
+| 5             | Crime                        | -   Training Day                                      |
+|               |                              | -   The Mod Squad                                     |
+|               |                              | -   2 Fast 2 Furious                                  |
+|               |                              | -   Bird on a Wire                                    |
+|               |                              | -   Rapid Fire                                        |
++---------------+------------------------------+-------------------------------------------------------+
+| 6             | Comedy/Life/School           | -   Ghost World                                       |
+|               |                              | -   Manhattan                                         |
+|               |                              | -   The Florida Project                               |
+|               |                              | -   Good Luck Chuck                                   |
+|               |                              | -   Annie Hall                                        |
++---------------+------------------------------+-------------------------------------------------------+
+| 7             | Family/Team Adventure/Horror | -   Ice Age: The Meltdown                             |
+|               |                              | -   Suburbicon                                        |
+|               |                              | -   Love the Coopers                                  |
+|               |                              | -   Insidious: Chapter 2                              |
+|               |                              | -   Insidious: The Last Key                           |
++---------------+------------------------------+-------------------------------------------------------+
+| 8             | Thriller/Horror              | -   Brainstorm                                        |
+|               |                              | -   Basic Instinct                                    |
+|               |                              | -   Silence of the Lambs                              |
+|               |                              | -   Law Abiding Citizen                               |
+|               |                              | -   Halloween II                                      |
++---------------+------------------------------+-------------------------------------------------------+
+| 9             | Job/Challenge                | -   The River                                         |
+|               |                              | -   Pacific Heights                                   |
+|               |                              | -   It Could Happen to You                            |
+|               |                              | -   Tower Heist                                       |
+|               |                              | -   The 33                                            |
++---------------+------------------------------+-------------------------------------------------------+
+| 10            | Town/Friendgroup             | -   Snatched                                          |
+|               |                              | -   Used Cars                                         |
+|               |                              | -   The Hustle                                        |
+|               |                              | -   Pinocchio and the Emperor of the Night            |
+|               |                              | -   Jackass Presents: Bad Grandpa                     |
++---------------+------------------------------+-------------------------------------------------------+
+
+: 5 Films Most Representative of Topic, by Topic
+
+### Effects of Metadata on Topical Prevalence
+
+Tables 4 and 5 are the estimated statistical effect of the 13 topical prevalence covariates on the 10 topics. The two continuous variables, **runtime** and **release_year**, are statistically significant for the majority of the topics. The estimated coefficients are very small but that may be related to the values for these two variables typically being large. For the sets of tagline emotion and perspective binary variables, the results are mixed and vary significantly by the topic. Of these variables, **Joy** is statistically significant for 7 of the 10 topics, which is notable because it was not the most common emotion found in the taglines. All emotions except surprise are statistically significant for at least one topic, suggesting that the presence of emotions is helpful in discerning topic prevalence in the text. For the perspective variables, the presence of **second person perspective** is statistically significant for half of the topics, and first person singular perspective is never statistically significant. Interestingly, First person plural perspective (we/our), which was not commonly used in taglines, is statistically significant for topics 2 (action) and 10 (town/friendgroup), which are two themes that focus on groups of people.
+
+```{r}
+#| include: false
+
+
+prep <- estimateEffect(1:10 ~ runtime + release_year + fps_pov_bin + sp_pov_bin + tps_pov_bin + fpp_pov_bin + tpp_pov_bin + anger_bin + fear_bin + sadness_bin + trust_bin + anticipation_bin + joy_bin + surprise_bin + disgust_bin, movietopics_2, meta=out$meta, 
+                       uncertainty="Global")
+
+#summary(prep, topics = 10)
+```
+
++-----------------------------+------------+------------+-----------+------------+------------+
+|                             | 1-Drama    | 2-Action   | 3-Family  | 4-Journey/ | 5-Crime    |
+|                             |            |            |           |            |            |
+|                             |            |            |           | Adventure  |            |
++=============================+============+============+===========+============+============+
+| Runtime                     | **0.002**  | **0.002**  | **0.001** | **-0.000** | 0.000      |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Release Year                | **0.001**  | 0.000      | **0.001** | -0.000     | **-0.001** |
++-----------------------------+------------+------------+-----------+------------+------------+
+| First Person Singular Pers. | 0.050      | -0.036     | 0.005     | -0.006     | -0.013     |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Second Person Pers.         | **-0.016** | **-0.028** | **0.021** | **-0.013** | -0.003     |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Third Person Singular Pers. | -0.012     | **-0.035** | 0.000     | **-0.017** | 0.009      |
++-----------------------------+------------+------------+-----------+------------+------------+
+| First Person Plural Pers.   | -0.026     | **0.093**  | -0.011    | 0.024      | -0.014     |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Third Person Plural Pers.   | **-0.027** | 0.004      | -0.002    | -0.015     | **0.020**  |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Anger                       | -0.010     | 0.017      | -0.007    | 0.009      | **0.020**  |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Fear                        | **-0.015** | 0.008      | 0.001     | 0.008      | 0.008      |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Sadness                     | -0.001     | -0.014     | 0.012     | **-0.024** | 0.004      |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Trust                       | **-0.031** | 0.012      | -0.009    | -0.006     | **0.053**  |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Anticipation                | 0.010      | 0.010      | 0.003     | **0.035**  | **-0.018** |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Joy                         | **0.048**  | **-0.028** | **0.024** | **-0.024** | **-0.045** |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Surprise                    | 0.011      | -0.004     | -0.008    | -0.011     | 0.004      |
++-----------------------------+------------+------------+-----------+------------+------------+
+| Disgust                     | -0.013     | -0.011     | 0.003     | 0.013      | -0.007     |
++-----------------------------+------------+------------+-----------+------------+------------+
+
+: Estimated Coefficients, with Significance, Topics 1-5 (Bold significant at .05 level)
+
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+|                             | Topic 6- Comedy/School | Topic 7-Family Adventure | Topic 8-Thrill/Horror | Topic 9 - Challenge/Work | Topic 10 - Town/Friendgroup |
++=============================+========================+==========================+=======================+==========================+=============================+
+| Runtime                     | **-0.001**             | **-0.000**               | -0.000                | **0.000**                | **-0.001**                  |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Release Year                | **-0.001**             | **0.002**                | **-0.001**            | **-0.001**               | **-0.001**                  |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| First Person Singular Pers. | -0.033                 | -0.009                   | 0.025                 | -0.000                   | -0.007                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Second Person Pers.         | 0.008                  | 0.007                    | **0.024**             | 0.004                    | -0.005                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Third Person Singular Pers. | **0.029**              | 0.000                    | 0.005                 | **0.019**                | 0.000                       |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| First Person Plural Pers.   | -0.006                 | -0.013                   | -0.003                | -0.016                   | **-0.030**                  |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Third Person Plural Pers.   | 0.007                  | -0.010                   | 0.005                 | **0.018**                | 0.008                       |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Anger                       | **-0.022**             | -0.011                   | 0.001                 | 0.012                    | -0.008                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Fear                        | **-0.031**             | 0.015                    | **0.022**             | **-0.008**               | -0.010                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Sadness                     | **0.021**              | 0.002                    | **0.015**             | -0.001                   | -0.003                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Trust                       | **-0.027**             | **-0.012**               | **0.013**             | 0.004                    | 0.001                       |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Anticipation                | **-0.027**             | **0.015**                | **0.011**             | **-0.015**               | -0.003                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Joy                         | **0.053**              | 0.002                    | **-0.030**            | -0.006                   | -0.007                      |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Surprise                    | 0.000                  | -0.005                   | -0.004                | 0.006                    | 0.008                       |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+| Disgust                     | -0.004                 | -0.003                   | **0.023**             | -0.002                   | 0.005                       |
++-----------------------------+------------------------+--------------------------+-----------------------+--------------------------+-----------------------------+
+
+: Estimated Coefficients, with Noted Significance, Topics 6-10 (Bold significant at .05 level)
+
+{{< pagebreak >}}
+
+### Comparing Different Film Success Metrics Across Topics
+
+```{r}
+#| include: false 
+theta <- movietopics_2$theta 
+dominant_topic <- apply(theta, 1, which.max)
+
+theta_nometa <- movietopics_nometa$theta 
+dominant_topic_nometa <- apply(theta_nometa, 1, which.max)
+
+movies_3 = meta %>% cbind(dominant_topic, dominant_topic_nometa) %>% mutate(topic_descr = factor(case_when(dominant_topic == 1 ~ "Topic 1: Adult Drama",
+                                                                                                   dominant_topic == 2 ~ "Topic 2: Action",
+                                                                                                   dominant_topic == 3 ~ "Topic 3: Family/Family Horror",
+                                                                                                   dominant_topic == 4 ~ "Topic 4: Adventure/Journey",
+                                                                                                   dominant_topic == 5 ~ "Topic 5: Crime",
+                                                                                                   dominant_topic == 6 ~ "Topic 6: Comedy/Life/School",
+                                                                                                   dominant_topic == 7 ~ "Topic 7: Family/Team Adventure/Horror",
+                                                                                                   dominant_topic == 8 ~ "Topic 8: Thriller/Horror",
+                                                                                                   dominant_topic == 9 ~ "Topic 9: Challenge/Work",
+                                                                                                   dominant_topic == 10 ~ "Topic 10: Town/Friendgroup"), 
+                                                                                                   levels = c("Topic 10: Town/Friendgroup","Topic 9: Challenge/Work", "Topic 8: Thriller/Horror", "Topic 7: Family/Team Adventure/Horror", "Topic 6: Comedy/Life/School", "Topic 5: Crime", "Topic 4: Adventure/Journey", "Topic 3: Family/Family Horror", "Topic 2: Action","Topic 1: Adult Drama"),
+                                                                                                   ordered = TRUE))
+
+
+```
+
+```{r}
+avgvote_topics = ggplot(movies_3, aes(x=topic_descr, y=vote_average, fill=topic_descr)) + geom_boxplot(color = "darkgrey") +theme_minimal() + xlab("Dominant Topic") + ylab("Audience Vote Average") + labs(title = "Plot 10: Distribution of Average Audience Score, by Topic Group", subtitle = "Dashed line represets overall sample median")+ coord_flip() + theme(legend.position="none") + geom_hline(yintercept = median(movies_3$vote_average), color = "red", linetype = "dashed", size = 1)
+```
+
+```{r}
+hlineval = median(movies_3$revenue_budget_ratio[movies_3$revenue_budget_ratio <= 10])
+
+revbudratio_topics = ggplot(data = movies_3 %>% filter(revenue_budget_ratio <= 10), aes(x=topic_descr, y=revenue_budget_ratio, fill=topic_descr)) + geom_boxplot(color = "darkgrey") +theme_minimal() + xlab("Dominant Topic") + ylab("Revenue Budget Ratio") + labs(title = "Plot 11: Distribution of Revenue Budget Ratio, by Topic Group \nOutliers Removed", subtitle = "Dashed line represents overall sample median") + coord_flip() + ylim(0,10) + theme(legend.position="none") + geom_hline(yintercept = hlineval, color = "red", linetype = "dashed", size = 1)
+
+```
+
+**Average Audience Score.** In plot 10, there is minimal difference in average audience score ratings across the 9 different topic groups. Nearly all of the subgroups have median value that is approximately the median of the overall sample. The one exception is group 1 (Adult Drama), which has a noticeably higher interquartile range and median value than the other categories.
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 8
+
+avgvote_topics
+
+```
+
+{{< pagebreak >}}
+
+**Box Office Revenue to Budget Ratio**. In plot 11, we can see that all the topics have a skewed right distribution; most values are less than 5 but each category has outliers with values in the 7.5-10 score range. Most of the groups (2,3,4,6,7,9,10) have medians that are approximately equal to the overall sample median. The only topic that has a median value noticeably greater than the sample is Topic 4 (Adventure/Journey). This makes some sense as many blockbuster hits are adventure movies. Topics 1 (Adult drama), Topic 5 (Crime) and Topics 8 (Thriller/Horror) have median values below the sample median, which also makes sense considering that these types of film may have more niche audiences than others.
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 8
+
+
+revbudratio_topics
+```
+
+{{< pagebreak >}}
+
+**Oscar Nominee**. In plot 12, topic 1 (Adult Drama) has a significantly higher percentage of films that were nominated for Oscars than the rest of the topics. This makes sense considering that most performances and films nominated for Academy Awards/critically acclaimed are adult dramas. Topic 2 (Action), Topic 9 (Challenge/Work), and Topic 4 (Adventure) also have higher percentage of Oscar-nominated films than the overall sample. These 4 topics align with film types that people may consider as "Oscar Bait", or films that are more likely to be nominated for performances or production (Adams, 2023; Staples, 2024).Topic 7 (Family/Team Adventure/Horror) has the lowest percentage of Oscar nominated films, which makes sense because films matching this topic are known to be underrepresented at the Oscars (Shedwick, 2024).  
+
+```{r, fig.align='center'}
+#| fig-height: 4
+#| fig-width: 8
+
+movie_oscar = movies_3 %>% group_by(topic_descr) %>% summarise(count = n(), oscarcount = sum(Oscar_nominee == "True")) %>% mutate(perc = round(oscarcount / count * 100,2))
+
+ggplot(movie_oscar, aes(x=topic_descr, y = perc, fill = topic_descr)) + geom_bar(stat = "identity", color = "darkgrey") + theme_minimal() + xlab("Topic Group") + ylab("Oscar Nominee Proportion") + labs(title = "Plot 12: Percentage of Films that were Oscar-Nominated,\nby Topic Group", subtitle = "Dashed line represents overall sample percentage") + theme(legend.position="none") + coord_flip() + geom_hline(yintercept = 19.1, color = "red",linetype = "dashed", size = 1.5)
+
+```
+
+## Limitations and Implications
+
+The findings in this case study demonstrate the use of qualitative information as a promising source of metadata to help inform a text topic model. While the research cannot prove that qualitative features are better topical covariates than quantitative features, the statistical significance of the range in features indicates that other researchers may want to consider short text as a feature that can support other modeling techniques.
+
+While the analysis highlights trends across the topics and different film success metrics, these findings are merely descriptive and cannot be considered predictive. There are other factors of a film not captured in this dataset that affect its success.
+
+{{< pagebreak >}}
+
+## Works Cited
+
+Adams, S. (2023, March 12). *The Oscars are Weird Now. Get Used to It.* Slate Magazine. <https://slate.com/culture/2023/03/oscars-2023-everything-everywhere-best-picture-winner.html>
+
+Bail, C. (n.d.). Topic Modeling. Github.com. <https://cbail.github.io/SICSS_Topic_Modeling.html>
+
+Bailey, M. (2018). *NRCLex*. PyPi.org. <https://pypi.org/project/NRCLex/>
+
+Bradley, D. (2020, September 18). *The Do’s and Don’ts of Writing a Tagline for Your Film or Video Project*. The Beat. <https://www.premiumbeat.com/blog/tagline-for-film-and-video/>
+
+(n.d.) *Cinemagoer*. GitHub.com <https://cinemagoer.readthedocs.io/en/latest/>
+
+(2024, October 23). *Full TMDB Movies Dataset 2024 (1M Movies)*. kaggle.com. <https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies/data>
+
+Lebryk, T. (2021, April 17). *Introduction to Structural Topic Model (STM).* Medium. <https://towardsdatascience.com/introduction-to-the-structural-topic-model-stm-34ec4bd5383>
+
+Mohammad, S. M. (n.d.). *NRC Word-Emotion Association Lexicon*. saifmohammad.com. <https://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm>
+
+Roberts, M. E., Stewart, B. M., & Tingley, D. (2019). stm: An R Package for Structural Topic Models. *Journal of Statistical Software*, *91*(2), 1–40. https://doi.org/10.18637/jss.v091.i02
+
+(n.d.). The Movie Database. TMDB. <https://www.themoviedb.org/>
+
+(2024). *The Oscar Award, 1927 - 2024.* kaggle.com. <https://www.kaggle.com/datasets/unanimad/the-oscar-award>
+
+Ross, B. (2024, October 15). *First Person, Second Person, and Third Person: Learn Point of View*. Grammarly. <https://www.grammarly.com/blog/grammar/first-second-and-third-person/>
+
+Silge, J. (2018, September 8). Training, evaluating, and interpreting topic models. *Julia Silge*. <https://juliasilge.com/blog/evaluating-stm/>
+
+Shedwick, G. (2024, March 6). *A Complete History of Horror Movies at the Oscars.* Collider. <https://collider.com/oscars-horror-movies/>
+
+Staples, L. (2024, March 4). *Maestro and the Art of the Oscar Bait*. Harpers Bazaar. <https://www.harpersbazaar.com/culture/film-tv/a60043386/maestro-oscar-bait-explained/>
+
+Trajceski, J. (2021, May 18). *Structural Topic Modeling with R - Part 1.* Medium. <https://jovantrajceski.medium.com/structural-topic-modeling-with-r-part-i-2da2b353d362>.
