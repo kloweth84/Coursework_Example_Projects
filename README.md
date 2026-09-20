@@ -17,11 +17,16 @@ Includes Projects completed as part of graduate and undergraduate coursework.
 	- Created a structural topic model of english-language movie plots using quantitative metadata (i.e. release year) and metadata arrived from other text features (movie taglines). 
 	- Published a shiny app in R that provides a walkthrough of how to implement a structural topic model and review the results: https://ppol5202-dataviz-ksl84.shinyapps.io/PPOL5205_ProjectShowcase/
 
-5) Analyzing Differences in Student Academic achievement on Standardized Tests across race and region in North Carolina (completed in 2017)
+5) Context of Evaluation and Data in 21st century Federal Policy: A Text Analysis Approach
+	- R code files that analyzes how the use of evaluation and data terminology has changed in the federal government during the 21st century. Analyzing a corpus of federal agency rules and presidential documents from the Federal Register (2001-2025), the research investigates the frequency of terms such as "evaluation," "data analysis," and "artificial intelligence," and employs GloVe word embedding models to analyze changes in their contextual usage. 
+    -  Powerpoint deck that summarizes research questions and findings
+
+
+6) Analyzing Differences in Student Academic achievement on Standardized Tests across race and region in North Carolina (completed in 2017)
 	- R file explores student academic achievement in grades 3-8 in North Carolina. Analyzes student achievement gap based on age, race, and region in NC.
         - Added PPT slides that contains figures generated from the R code and explains the different regression models. 
 
-6) Exploration of Academic Majors (completed in 2017)
+7) Exploration of Academic Majors (completed in 2017)
 	- R File (math_associated_studies_minors.R) analyzes and graphs students in the undergraduate math major and minor program to determine other official courses of study. 
 	- Creates math_associated_studies_minors.jpeg and math_associated_studies.png graphs
 	
