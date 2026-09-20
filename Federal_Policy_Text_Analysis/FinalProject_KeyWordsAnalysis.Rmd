@@ -1,0 +1,967 @@
+---
+title: "FinalProject_KeyWordsAnalysis"
+author: "Katharyn Loweth"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(tidyverse) # loads dplyr, ggplot2, and others
+library(stringr) # to handle text elements
+library(tidytext) # includes set of functions useful for manipulating text
+library(text2vec) # for word embedding implementation
+library(widyr) # for reshaping the text data
+library(irlba) # for svd
+library(here)
+library(quanteda)
+library(ggplot2)
+library(conText)
+library(scales)
+library(RColorBrewer)
+```
+
+
+
+```{r}
+setwd("/Users/katharynloweth/Desktop/TextAsData/TAD_FinalProject")
+
+#clearing environment
+rm(list = ls())
+
+#loading data
+fed = read.csv("TAD_finalproject_corpus_FINAL_050125.csv") #36,730 documents
+glimpse(fed)
+#str(fed)
+
+table(fed$president.identifier) #one bill clinton record
+fed = fed %>% filter(fed$president.identifier != "william-j-clinton")
+
+sum(is.na(fed$body_text) | fed$body_text == "") #one entry blank in body text, removing
+
+fed <- fed[!is.na(fed$body_text) & fed$body_text != "", ]
+dim(fed)
+```
+
+adding additional variables to data frame
+
+```{r}
+#creating ID
+fed$id <- 1:nrow(fed)
+
+#changing format of date variable so that it is recognized as a date
+fed$publication_date_ref = as.Date(fed$publication_date, "%Y-%m-%d")
+#typeof(fed$publication_date_ref)
+#head(fed$publication_date_ref)
+fed$publication_year = format(fed$publication_date_ref, "%Y")
+#head(fed$publication_year)
+fed$publication_monthyear = format(fed$publication_date_ref, "%m-%Y")
+
+
+fed = fed %>% mutate(presidential_term = case_when((publication_date_ref < as.Date("2005-01-20") & fed$president.identifier == "george-w-bush") ~ "Bush-1",
+                                                   (publication_date_ref >= as.Date("2005-01-20") & fed$president.identifier == "george-w-bush") ~ "Bush-2",
+                                                   (publication_date_ref < as.Date("2013-01-20") & fed$president.identifier == "barack-obama") ~ "Obama-1",
+                                                   (publication_date_ref >= as.Date("2013-01-20") & fed$president.identifier == "barack-obama") ~ "Obama-2",
+                                                   (publication_date_ref < as.Date("2021-01-20") & fed$president.identifier == "donald-trump") ~ "Trump-1",
+                                                   (fed$president.identifier == "joe-biden") ~ "Biden", 
+                                                   (publication_date_ref >= as.Date("2025-01-20") &fed$president.identifier == "donald-trump") ~ "Trump-2"), 
+                     pres_party = case_when(fed$president.identifier %in% c("george-w-bush", "donald-trump") ~ "republican", fed$president.identifier %in% c("barack-obama","joe-biden") ~ "democrat")) %>% filter(presidential_term != "Trump-2")
+
+
+#fed_2 = fed %>% filter(presidential_term != "Trump-2")
+```
+
+Creating corpus/tokens
+
+I used chatgpt to help with removing nonsense/irrelevant strings as tokens from the corpus
+
+prompt: looking through my tokens i see strings that are phone numbers/other numbers, or strings that are not meaningful that contain dashes. how can i remove them. in the junk patterns i want to include things like "n-1a"
+```{r}
+fed_corpus <- corpus(fed, text_field = "body_text")
+#names(docvars(fed_corpus))
+
+junk_patterns <- c(
+  "^[0-9]+$",              # pure numbers like 2020
+  "^[0-9\\-]+$",           # numbers with dashes like 123-456
+  "^[0-9]{3,}-[0-9]{3,}",  # phone-number-like patterns
+  "^[^a-z]+$",             # non-alphabetic strings
+  "^[a-z]*-[0-9a-z]+$",    # alphanumeric with dash like n-1a, abc-123
+  "^[0-9a-z]+-[a-z]+$"     # variants like 1a-test or a1-b
+)
+
+
+custom_bigrams <- phrase(c("data analysis", 
+                           "government evaluation", 
+                           "government efficiency", 
+                           "data collection",
+                           "data driven", 
+                           "program evaluation",
+                           "performance evaluation",
+                           "data science",
+                           "machine learning",
+                           "artificial intelligence",
+                           "evaluation policy",
+                           "evaluation plan",
+                           "evidence building",
+                           "data management"))
+
+# Tokenize the corpus
+
+fed_corpus_tokens <- tokens(fed_corpus, what = "word", remove_punct = TRUE, remove_numbers = TRUE, remove_symbols = TRUE, remove_separators = TRUE) %>% tokens_tolower() %>% tokens_remove(pattern = junk_patterns, valuetype = "regex") %>% tokens_trim(min_termfreq = 15, termfreq_type = "count", min_docfreq = 15, docfreq_type = "count", padding = TRUE) 
+
+#saveRDS(fed_corpus_tokens, file = "token_files/fed_corpus_tokens.rds")
+
+```
+
+```{r}
+
+chunk_size <- 5000
+# Get the total number of rows
+num_rows <- nrow(fed)
+
+# Initialize an empty list to store the processed tokens
+all_processed_tokens <- list()
+
+# Iterate through the data frame in chunks
+for (i in seq(1, num_rows, by = chunk_size)) {
+  # Determine the rows for the current chunk
+  start_row <- i
+  end_row <- min(i + chunk_size - 1, num_rows)
+
+  # Subset the data frame for the current chunk
+  current_chunk <- fed[start_row:end_row, ]
+
+  # Create a corpus from the current chunk
+  temp_corpus <- corpus(current_chunk, text_field = "body_text") 
+
+  # Tokenize the corpus
+  temp_tokens <- tokens(temp_corpus, what = "word", remove_punct = TRUE,
+                        remove_numbers = TRUE, remove_symbols = TRUE,
+                        remove_separators = TRUE) %>%
+    tokens_tolower() %>%
+    tokens_remove(pattern = junk_patterns, valuetype = "regex") %>%
+    tokens_trim(min_termfreq = 15, termfreq_type = "count",
+                  min_docfreq = 15, docfreq_type = "count", padding = TRUE)
+
+  # Append the processed tokens to our list
+  all_processed_tokens <- c(all_processed_tokens, temp_tokens)
+
+  # Optional: Remove the chunk and run garbage collection
+  rm(temp_corpus, temp_tokens, current_chunk)
+  gc()
+}
+
+# Now 'all_processed_tokens' contains a list of tokenized objects,
+# with document-level variables preserved within each chunk.
+
+# If you need a single tokens object at the end, you can combine them
+final_tokens <- do.call(c, all_processed_tokens)
+
+# You can then proceed with further analysis on 'final_tokens'
+# The document-level variables should be accessible via docvars(final_tokens)
+
+saveRDS(final_tokens, file = "token_files/fed_corpus_tokens_0501.rds")
+```
+
+#if loading in tokens object directly can start here
+
+```{r}
+fed_corpus_tokens = readRDS("token_files/fed_corpus_tokens.rds")
+#fed_corpus_tokens = readRDS("token_files/fed_corpus_tokens_0501.rds")
+
+
+custom_bigrams <- phrase(c("data analysis", 
+                           "government evaluation", 
+                           "government efficiency", 
+                           "data collection",
+                           "data driven", 
+                           "program evaluation",
+                           "performance evaluation",
+                           "data science",
+                           "machine learning",
+                           "artificial intelligence",
+                           "evaluation policy",
+                           "evaluation plan",
+                           "evidence building",
+                           "data management"))
+
+#token
+fed_corpus_tokens_custom <- fed_corpus_tokens %>% tokens_compound(pattern = custom_bigrams)
+
+
+
+#fed_corpus_tokens_custom <- tokens_compound(fed_corpus_tokens, pattern = custom_bigrams) #pattern argument allows you to keep specify how to make compound words
+head(fed_corpus_tokens_custom)
+
+#fed_corpus_tokens_custom[[1]]
+
+```
+
+#functions and objects to help with below and graphs
+
+```{r}
+
+prepping_token_groups = function(tok, list_of_words, group_variable){
+  group_var <- docvars(tok)[[group_variable]]
+  dfm_grouped = tok %>% tokens_group(groups = group_var) %>% dfm() %>% dfm_select(pattern = list_of_words,
+                                                                                  selection = "keep")
+  dfm_df = convert(dfm_grouped, to = "data.frame")
+  dfm_df_long = pivot_longer(dfm_df, cols = -doc_id, names_to = "token", values_to = "count")
+  return(dfm_df_long)
+}
+
+##unigrams
+unigrams_only = c("data", "analysis", "evaluation", "efficiency", "ai", "evidence")
+
+unigram_cols <- c("data" = "#8EB75A", "analysis" = "#174195", "evaluation" = "#0A1C40", "efficiency" = "#51B2DE", "ai" = "#BBBCBC", "evidence" = "#D3EBF7")
+
+custom_words_2 <- phrase(c("data_analysis", 
+                           "government_evaluation", 
+                           "government_efficiency", 
+                           "data_driven", "data_collection",
+                           "program_evaluation",
+                           "performance_evaluation",
+                           "data_science", "artificial_intelligence", "machine_learning"))
+
+
+bigram_cols <- c("data_analysis" = "#8EB75A", "government_evaluation" =  "#334220", "government_efficiency" = "#556e36", "data_driven" = "#174195", "data_collection" = "#0A1C40", "program_evaluation" = "#51B2DE", "performance_evaluation" = "lightgray", "artificial_intelligence" = "#326e89",  "machine_learning" = "#7d7d7d", "data_science" = "#D3EBF7")
+
+
+prepping_token_groups_interaction = function(tok, list_of_words, group_variable_1, group_variable_2){
+  group_var_1 <- docvars(tok)[[group_variable_1]]
+  group_var_2 <- docvars(tok)[[group_variable_2]]
+  dfm_grouped = tok %>% tokens_group(groups = interaction(group_var_1, group_var_2, sep = "__")) %>% dfm() %>% dfm_select(pattern = list_of_words, selection = "keep")
+  dfm_df = convert(dfm_grouped, to = "data.frame")
+  dfm_df_long = pivot_longer(dfm_df, cols = -doc_id, names_to = "token", values_to = "count")
+  return(dfm_df_long)
+}
+
+```
+
+
+Use of bigrams terms over time:
+
+I used chat_gpt to help better understand how to visualize these results: 
+
+prompt: "my object fed_corpus comes from a feature "body_text" in a dataframe that contains information like publication date and type of document. I want to count the instances of these bigram word uses and demonstrate how it changes over time. what is the best way to do that"
+```{r}
+
+
+
+annual_unigram_counts = prepping_token_groups(fed_corpus_tokens, unigrams_only, "publication_year")
+
+annual_unigram_counts$doc_id = as.integer(annual_unigram_counts$doc_id)
+
+annual_unigram_counts = annual_unigram_counts %>% group_by(token) %>% mutate(count_norm = ((count - min(count)) / (max(count) - min(count))), total_token_count = sum(count)) 
+
+
+annual_unigram_counts_plot = ggplot(annual_unigram_counts, 
+                          aes(x = doc_id, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Unigram Token Usage in Federal Government Documents", subtitle = "January 20, 2001-April 19,2025", color = "Unigram") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols)
+
+annual_unigram_counts_plot
+
+ggsave("figures/annual_unigram_counts.jpg", annual_unigram_counts_plot, width = 8, height = 6)
+
+
+annual_unigram_counts_norm_plot = ggplot(annual_unigram_counts, 
+                          aes(x = doc_id, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Unigram Token Usage in Federal Government Documents", subtitle = "January 20, 2001-April 19,2025", color = "Unigram") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols) 
+
+annual_unigram_counts_norm_plot
+
+ggsave("figures/annual_unigram_counts_norm.jpg", annual_unigram_counts_norm_plot, width = 8, height = 6)
+
+
+##bigrams 
+
+
+
+annual_term_counts = prepping_token_groups(fed_corpus_tokens_custom, custom_words_2, "publication_year")
+
+annual_term_counts$doc_id = as.integer(annual_term_counts$doc_id)
+
+annual_term_counts = annual_term_counts %>% group_by(token) %>% mutate(count_norm = ((count - min(count)) / (max(count) - min(count))), total_token_count = sum(count)) 
+
+annual_bigram_counts = ggplot(annual_term_counts %>% filter(token %in% c("data_analysis", 
+                           "government_evaluation", 
+                           "government_efficiency", 
+                           "data_driven", "data_collection",
+                           "program_evaluation",
+                           "performance_evaluation", "data_science", "artificial_intelligence", "machine_learning") & total_token_count >=50), 
+                          aes(x = doc_id, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Bigram Token Usage in Federal Government Documents", subtitle = "January 20, 2001-April 19,2025", color = "Bigram") + theme_minimal() + guides(color=guide_legend(ncol=3)) + theme(legend.position="bottom")  + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + guides(color=guide_legend(ncol=4)) + scale_color_manual(values = bigram_cols)
+
+annual_bigram_counts
+
+ggsave("figures/annual_bigram_counts.jpg",annual_bigram_counts, width = 9, height = 6)
+
+annual_bigram_counts_norm = ggplot(annual_term_counts %>% filter(total_token_count >=50), 
+                          aes(x = doc_id, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Bigram Token Usage in Federal Government Documents", subtitle = "January 20, 2001-April 19,2025", color = "Bigram") + theme_minimal() + guides(color=guide_legend(ncol=3)) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(legend.position="bottom")  + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + guides(color=guide_legend(ncol=4)) + scale_color_manual(values = bigram_cols)
+
+annual_bigram_counts_norm
+
+ggsave("figures/annual_bigram_counts_norm.jpg",annual_bigram_counts_norm, width = 9, height = 6)
+
+
+```
+
+Count use of Terms Over Time, by Year and DocType
+
+used chatgpt to better understand the formatting of intersection
+prompt: "why is it that when i try to separate the created label for doc_id, which looks like "2009.federalagency" my two new columns are blank:"
+
+```{r}
+
+
+annual_doctype_term_counts = prepping_token_groups_interaction(fed_corpus_tokens_custom, custom_words_2, "publication_year", "doctype")
+
+annual_doctype_unigram_counts = prepping_token_groups_interaction(fed_corpus_tokens, unigrams_only, "publication_year", "doctype")
+
+annual_doctype_term_counts_v2 <- separate(annual_doctype_term_counts, col = doc_id, into = c("Year", "Doctype"), sep = '__')
+
+annual_doctype_term_counts_v2$Year = as.integer(annual_doctype_term_counts_v2$Year)
+
+annual_doctype_term_counts_v2 = annual_doctype_term_counts_v2 %>% group_by(Doctype, token) %>% mutate(count_norm = ((count - min(count)) / (max(count) - min(count))), doctype_token_count = sum(count)) 
+
+annual_doctype_unigram_counts_v2 <- separate(annual_doctype_unigram_counts, col = doc_id, into = c("Year", "Doctype"), sep = '__')
+
+annual_doctype_unigram_counts_v2$Year = as.integer(annual_doctype_unigram_counts_v2$Year)
+
+annual_doctype_unigram_counts_v2 = annual_doctype_unigram_counts_v2 %>% group_by(Doctype, token) %>% mutate(count_norm = ((count - min(count)) / (max(count) - min(count))), doctype_token_count = sum(count)) 
+
+
+annual_eo_unigram_counts = ggplot(annual_doctype_unigram_counts_v2 %>% filter(Doctype == "ExecOrder" & doctype_token_count >= 10), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Unigram Usage in Presidential Documents", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols) + labs(color = "Unigram")
+
+annual_eo_unigram_counts
+
+ggsave("figures/annual_eo_unigram_counts.jpg", annual_eo_unigram_counts, width = 8, height = 6)
+
+annual_eo_unigram_counts_log = ggplot(annual_doctype_unigram_counts_v2 %>% filter(Doctype == "ExecOrder" & doctype_token_count >= 10), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Unigram Usage in Presidential Documents", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols) + labs(color = "Unigram") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1))
+
+annual_eo_unigram_counts_log
+
+ggsave("figures/annual_eo_unigram_counts_log.jpg", annual_eo_unigram_counts_log, width = 8, height = 6)
+
+
+annual_eo_bigram_counts = ggplot(annual_doctype_term_counts_v2 %>% filter(Doctype == "ExecOrder" & doctype_token_count >= 5), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Bigram Usage in Presidential Documents", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + guides(color=guide_legend(ncol=4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = bigram_cols) + labs(color = "Bigram")
+
+annual_eo_bigram_counts
+
+ggsave("figures/annual_eo_bigram_counts.jpg", annual_eo_bigram_counts, width = 9, height = 6)
+
+annual_eo_bigram_counts_norm = ggplot(annual_doctype_term_counts_v2 %>% filter(Doctype == "ExecOrder" & doctype_token_count >= 5), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Bigram Usage in Presidential Documents", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 5)) + guides(color=guide_legend(ncol=4)) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(text = element_text(size = 14)) + scale_color_manual(values = bigram_cols) + labs(color = "Bigram")
+
+annual_eo_bigram_counts_norm
+
+ggsave("figures/annual_eo_bigram_counts_norm.jpg", annual_eo_bigram_counts_norm, width = 9, height = 6)
+
+
+annual_rule_bigram_counts = ggplot(annual_doctype_term_counts_v2 %>% filter(Doctype == "AgencyRuling" & doctype_token_count >= 50), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Bigram Usage in Federal Agency Rules", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + guides(color=guide_legend(ncol=4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = bigram_cols) + labs(color = "Bigram")
+
+annual_rule_bigram_counts
+
+ggsave("figures/annual_rule_bigram_counts.jpg", annual_rule_bigram_counts, width = 9, height = 6)
+
+annual_rule_bigram_counts_norm = ggplot(annual_doctype_term_counts_v2 %>% filter(Doctype == "AgencyRuling" & doctype_token_count >= 50), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Bigram Usage in Federal Agency Rules", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + guides(color=guide_legend(ncol=4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = bigram_cols) + labs(color = "Bigram")
+
+annual_rule_bigram_counts_norm
+
+ggsave("figures/annual_rule_bigram_counts_norm.jpg", annual_rule_bigram_counts_norm, width = 9, height = 6)
+
+
+
+annual_rule_unigram_counts = ggplot(annual_doctype_unigram_counts_v2 %>% filter(Doctype == "AgencyRuling"), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Count", title = "Unigram Term Usage in Federal Agency Rules", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols) + labs(color = "Unigram")
+
+annual_rule_unigram_counts
+
+ggsave("figures/annual_rule_unigram_counts.jpg", annual_rule_unigram_counts, width = 8, height = 6)
+
+annual_rule_unigram_counts_norm = ggplot(annual_doctype_unigram_counts_v2 %>% filter(Doctype == "AgencyRuling"), 
+                          aes(x = Year, y = count, color = token, group = token)) + geom_line(linewidth = 1) + labs(x = "Year", y = "Pseudo Log(Count)", title = "Unigram Term Usage in Federal Agency Rules", subtitle = "January 20, 2001-April 19,2025") + theme_minimal() + theme(legend.position="bottom") + scale_x_continuous(breaks = seq(2000, 2025, by = 4)) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(text = element_text(size = 14)) + scale_color_manual(values = unigram_cols) + labs(color = "Unigram")
+
+annual_rule_unigram_counts_norm
+
+ggsave("figures/annual_rule_unigram_counts_norm.jpg", annual_rule_unigram_counts_norm, width = 8, height = 6)
+
+
+
+```
+
+
+Examination of artificial intelligence as an emerging term in these documents:
+```{r}
+
+doctype_cols <- c("AgencyRuling" = "#8EB75A", "ExecOrder" = "#51B2DE")
+
+monthly_doctype_count = prepping_token_groups_interaction(fed_corpus_tokens_custom, custom_words_2, "publication_monthyear", "doctype")
+
+monthly_doctype_count_v2 <- separate(monthly_doctype_count, col = doc_id, into = c("Month_Year", "Doctype"), sep = '__')
+
+
+monthly_doctype_count_v2$Month_Year_ref = as.Date(paste0("01-", monthly_doctype_count_v2$Month_Year), format = "%d-%m-%Y")
+
+monthly_doctype_count_v2_filtered <- monthly_doctype_count_v2 %>% filter(token == "artificial_intelligence" & Month_Year_ref >= as.Date("2017-01-01"))
+
+ai_count_trump_biden = ggplot(monthly_doctype_count_v2_filtered, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "1 year", date_labels = "%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump & Biden Administrations' Use of Term 'Artificial Intelligence'") + xlab("Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed") + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols) + ylab("Count")
+
+ai_count_trump_biden
+
+ggsave("figures/ai_count_trump_biden.jpg", ai_count_trump_biden, width = 8, height = 4)
+
+ai_count_trump_biden_log = ggplot(monthly_doctype_count_v2_filtered, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "1 year", date_labels = "%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump & Biden Administrations' Use of Term 'Artificial Intelligence'") + xlab("Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed") + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols) + ylab("Pseudo log(count)") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1))
+
+ai_count_trump_biden_log
+
+ggsave("figures/ai_count_trump_biden_log.jpg", ai_count_trump_biden_log, width = 8, height = 4)
+
+
+
+ai_count_biden = ggplot(monthly_doctype_count_v2_filtered %>% filter(Month_Year_ref >= as.Date("2021-01-01") & Month_Year_ref <= as.Date("2025-01-01")), aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_minor_breaks = "1 month", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Biden Administration Use of Term Artificial Intelligence") + xlab("Month Year") + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols)
+
+ai_count_biden
+
+ggsave("figures/ai_count_biden.jpg", ai_count_biden, width = 8, height = 4)
+
+ai_count_biden_log = ggplot(monthly_doctype_count_v2_filtered %>% filter(Month_Year_ref >= as.Date("2021-01-01") & Month_Year_ref <= as.Date("2025-01-01")), aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_minor_breaks = "1 month", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Biden Administration Use of Term Artificial Intelligence") + xlab("Month Year") + ylab("Pseudo log(count)") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1))  + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols)
+
+ai_count_biden_log
+
+
+ai_count_trump = ggplot(monthly_doctype_count_v2_filtered %>% filter(Month_Year_ref <= as.Date("2021-01-01")), aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_minor_breaks = "1 month", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump Administration Use of Term Artificial Intelligence") + xlab("Month Year") + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols)
+
+ai_count_trump
+
+ggsave("figures/ai_count_trump.jpg", ai_count_trump, width = 8, height = 4)
+
+ai_count_trump_log = ggplot(monthly_doctype_count_v2_filtered %>% filter(Month_Year_ref <= as.Date("2021-01-01")), aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_minor_breaks = "1 month", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump Administration Use of Term Artificial Intelligence") + xlab("Month Year") + ylab("Pseudo log(count)") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(text = element_text(size = 14)) + scale_color_manual(values = doctype_cols)
+
+ai_count_trump_log
+
+```
+examination of increase in "evaluation" during the Trump/Biden administrations
+
+```{r}
+
+monthly_doctype_unigram_count = prepping_token_groups_interaction(fed_corpus_tokens, unigrams_only, "publication_monthyear", "doctype")
+
+monthly_doctype_unigram_count_v2 <- separate(monthly_doctype_unigram_count, col = doc_id, into = c("Month_Year", "Doctype"), sep = '__')
+
+
+monthly_doctype_unigram_count_v2$Month_Year_ref = as.Date(paste0("01-", monthly_doctype_unigram_count_v2$Month_Year), format = "%d-%m-%Y")
+
+monthly_doctype_unigram_count_v2_filtered <- monthly_doctype_unigram_count_v2 %>% filter(token == "evaluation" & Month_Year_ref >= as.Date("2017-01-01"))
+
+ggplot(monthly_doctype_unigram_count_v2_filtered, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump/Biden Administrations Use of Term Evaluation") + xlab("Month Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo log(count)") + theme(text = element_text(size = 14))
+
+
+```
+
+Examination of increase in "data" during the Trump/Biden administrations:
+
+```{r}
+
+monthly_doctype_unigram_count = prepping_token_groups_interaction(fed_corpus_tokens, unigrams_only, "publication_monthyear", "doctype")
+
+monthly_doctype_unigram_count_v2 <- separate(monthly_doctype_unigram_count, col = doc_id, into = c("Month_Year", "Doctype"), sep = '__')
+
+
+monthly_doctype_unigram_count_v2$Month_Year_ref = as.Date(paste0("01-", monthly_doctype_unigram_count_v2$Month_Year), format = "%d-%m-%Y")
+
+monthly_doctype_unigram_count_v2_filtered <- monthly_doctype_unigram_count_v2 %>% filter(token == "data" & Month_Year_ref >= as.Date("2017-01-01"))
+
+ggplot(monthly_doctype_unigram_count_v2_filtered, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump/Biden Administrations Use of Term Data") + xlab("Month Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo log(count)") + theme(text = element_text(size = 14))
+
+trump_1_data_count = monthly_doctype_unigram_count_v2_filtered %>% filter(Month_Year_ref <= as.Date("2021-01-01")) 
+
+trump_1_data_count_group = trump_1_data_count %>% group_by(Doctype) %>% mutate(count_norm = (count - min(count)) / (max(count) - min(count)))
+
+biden_data_count =monthly_doctype_unigram_count_v2_filtered %>% filter(Month_Year_ref >= as.Date("2021-01-01") & Month_Year_ref <= as.Date("2025-01-01")) 
+
+biden_data_count_group = biden_data_count %>% group_by(Doctype) %>% mutate(count_norm = (count - min(count)) / (max(count) - min(count)))
+
+
+trump_1_data_count = ggplot(trump_1_data_count_group, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump's First Administration Relative Use of Term Data") + xlab("Month Year") + ylab("Pseudo Log(count)") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme(text = element_text(size = 14))
+
+trump_1_data_count
+
+ggsave("figures/trump_1_data_count.jpg", trump_1_data_count, width = 6, height = 4)
+
+
+biden_data_count = ggplot(biden_data_count_group, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Biden Administration Relative Use of Term Data") + xlab("Month Year") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo Log(count)") + theme(text = element_text(size = 14))
+
+biden_data_count 
+
+ggsave("figures/biden_data_count.jpg", biden_data_count, width = 6, height = 4)
+
+
+```
+
+
+
+```{r}
+
+monthly_doctype_unigram_count_v2_ai <- monthly_doctype_unigram_count_v2 %>% filter(token == "ai" & Month_Year_ref >= as.Date("2017-01-01"))
+
+trump_1_ai_count = monthly_doctype_unigram_count_v2_ai %>% filter(Month_Year_ref <= as.Date("2021-01-01")) 
+
+
+biden_ai_count=monthly_doctype_unigram_count_v2_ai %>% filter(Month_Year_ref >= as.Date("2021-01-01") & Month_Year_ref <= as.Date("2025-01-01")) 
+
+ggplot(monthly_doctype_unigram_count_v2_ai, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump/Biden Administrations Use of Term AI") + xlab("Month Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed")  + theme(text = element_text(size = 14))
+
+ggplot(monthly_doctype_unigram_count_v2_ai, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump/Biden Administrations Use of Term AI") + xlab("Month Year") + geom_vline(xintercept = as.Date("2021-01-01"), linetype = "dashed") + geom_vline(xintercept = as.Date("2025-01-01"), linetype = "dashed") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo log(count)") + theme(text = element_text(size = 14))
+
+ggplot(trump_1_ai_count, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Trump's First Administration Use of Term AI") + xlab("Month Year") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo log(count)") + theme(text = element_text(size = 14))
+
+ggplot(biden_ai_count, aes(x = Month_Year_ref, y = count, group = Doctype, color = Doctype)) + geom_line(linewidth = 1) + scale_x_date(date_breaks = "6 months", date_labels = "%b\n%Y") + theme_minimal() + theme(legend.position="bottom") + ggtitle("Biden Administration Use of Term AI") + xlab("Month Year") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + ylab("Pseudo log(count)") + theme(text = element_text(size = 14))
+
+```
+
+
+###Term Count by Presidential Term
+
+I used chatgpt to help with formatting of x axis labels:
+
+prompt: on the x axis I want to reformat the labels so that the dash becomes a " " and the words are on two lines
+
+I used chatgpt to help with transforming y values to make it easier to see: 
+
+prompt: I have a graph like this where the values across the different categories vary widely, and i am considering doing a log transformation. However, a few of the cateogry y values for some groups equal 0. how can i set it so that those that are 0 remain 0 but values greater than 0 are log transformed? 
+
+```{r}
+
+## add cols
+
+pres <- c("Bush-1" = "#8EB75A", "Bush-2" = "#556e36","Obama-2" = "#174195", "Obama-1" = "#4567aa", "Trump-2" = "#51B2DE", "Biden" = "#BBBCBC", "Trump-1" = "#97d1eb")
+
+
+
+unigrams_only = c("data", "analysis", "evaluation", "efficiency", "ai")
+
+bigrams_only <- phrase(c("data_analysis", 
+                           "government_efficiency", 
+                           "data_driven", 
+                           "data_collection",
+                           "program_evaluation",
+                           "performance_evaluation",
+                           "artificial_intelligence", "machine_learning"))
+
+bigram_count_pterm = prepping_token_groups(fed_corpus_tokens_custom, bigrams_only, "presidential_term")
+
+unigram_count_pterm = prepping_token_groups(fed_corpus_tokens, unigrams_only, "presidential_term")
+
+
+bigram_count_pterm$doc_id <- factor(bigram_count_pterm$doc_id, levels = c("Bush-1", "Bush-2", "Obama-1", "Obama-2", "Trump-1", "Biden", "Trump-2"))
+
+bigram_count_pterm$log_count = ifelse(bigram_count_pterm$count >0, log(bigram_count_pterm$count), 0)
+
+unigram_count_pterm$doc_id <- factor(unigram_count_pterm$doc_id, levels = c("Bush-1", "Bush-2", "Obama-1", "Obama-2", "Trump-1", "Biden", "Trump-2"))
+
+unigram_count_pterm$log_count = ifelse(unigram_count_pterm$count >0, log(unigram_count_pterm$count), 0)
+
+bigram_pterm = ggplot(bigram_count_pterm, 
+                          aes(y = count, x = token, fill = doc_id)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Bigram", y = "Pseudo Log(Count)", title = "Bigram Usage in Federal Documents, by Presidential Administration") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme_minimal() + theme(legend.position="bottom") + scale_x_discrete(labels = c(
+      "data_analysis" = "data\nanalysis",
+      "data_driven" = "data\ndriven",
+      "program_evaluation" = "program\nevaluation",
+      "performance_evaluation" = "performance\nevaluation",
+      "government_efficiency" = "government\nefficiency",
+      "data_collection" = "data\ncollection",
+      "artificial_intelligence" = "artificial\nintelligence",
+      "machine_learning" = "machine\nlearning")) + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+bigram_pterm 
+
+ggsave("figures/bigram_count_pterm.jpg", bigram_pterm, width = 9, height = 6)
+
+unigram_pterm = ggplot(unigram_count_pterm, 
+                          aes(y = count, x = token, fill = doc_id)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Token", y = "Pseudo Log(Count)", title = "Unigram Usage in Federal Documents, by Presidential Administration") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme_minimal() + theme(legend.position="bottom") + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+unigram_pterm 
+
+ggsave("figures/unigram_count_pterm.jpg", unigram_pterm, width = 9, height = 6)
+
+
+```
+
+
+
+
+Term Counts by Presidential Term and Document Type
+```{r}
+
+bigram_pterm_doctype_counts = prepping_token_groups_interaction(fed_corpus_tokens_custom, bigrams_only, "presidential_term", "doctype")
+
+
+bigram_pterm_doctype_counts_v2 <- separate(bigram_pterm_doctype_counts, col = doc_id, into = c("Pterm", "Doctype"), sep = '__')
+
+bigram_pterm_doctype_counts_v2$Pterm <- factor(bigram_pterm_doctype_counts_v2$Pterm, levels = c("Bush-1", "Bush-2", "Obama-1", "Obama-2", "Trump-1", "Biden", "Trump-2"))
+
+unigram_pterm_doctype_counts = prepping_token_groups_interaction(fed_corpus_tokens, unigrams_only, "presidential_term", "doctype")
+
+unigram_pterm_doctype_counts_v2 <- separate(unigram_pterm_doctype_counts, col = doc_id, into = c("Pterm", "Doctype"), sep = '__')
+
+unigram_pterm_doctype_counts_v2$Pterm <- factor(unigram_pterm_doctype_counts_v2$Pterm, levels = c("Bush-1", "Bush-2", "Obama-1", "Obama-2", "Trump-1", "Biden", "Trump-2"))
+
+
+bigram_eo_count_pterm = ggplot(bigram_pterm_doctype_counts_v2 %>% filter(Doctype == "ExecOrder"), 
+                          aes(y = count, x = token, fill = Pterm)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Bigram", y = "Pseudo Log(Count)", title = "Bigram Usage in Presidential Documents, by Presidential Administration") + theme_minimal() + theme(legend.position="bottom") + scale_x_discrete(labels = c(
+      "data_analysis" = "data\nanalysis",
+      "data_driven" = "data\ndriven",
+      "program_evaluation" = "program\nevaluation",
+      "performance_evaluation" = "performance\nevaluation",
+      "government_efficiency" = "government\nefficiency",
+      "data_collection" = "data\ncollection",
+      "artificial_intelligence" = "artificial\nintelligence",
+      "machine_learning" = "machine\nlearning")) + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+bigram_eo_count_pterm
+
+ggsave("figures/bigram_eo_count_pterm.jpg", bigram_eo_count_pterm, width = 9, height = 6)
+
+unigram_eo_count_pterm = ggplot(unigram_pterm_doctype_counts_v2 %>% filter(Doctype == "ExecOrder"), 
+                          aes(y = count, x = token, fill = Pterm)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Token", y = "Pseudo Log(Count)", title = "Unigram Usage in Presidential Documents, by Presidential Administration") + theme_minimal() + theme(legend.position="bottom") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+unigram_eo_count_pterm 
+
+ggsave("figures/unigram_eo_count_pterm.jpg", unigram_eo_count_pterm, width = 9, height = 6)
+
+
+bigram_agency_count_pterm = ggplot(bigram_pterm_doctype_counts_v2 %>% filter(Doctype == "AgencyRuling"), 
+                          aes(y = count, x = token, fill = Pterm)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Bigram", y = "Pseudo Log(Count)", title = "Bigram Usage in Final Agency Rules, by Presidential Administration") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme_minimal() + theme(legend.position="bottom") + scale_x_discrete(labels = c(
+      "data_analysis" = "data\nanalysis",
+      "data_driven" = "data\ndriven",
+      "program_evaluation" = "program\nevaluation",
+      "performance_evaluation" = "performance\nevaluation",
+      "government_efficiency" = "government\nefficiency",
+      "data_collection" = "data\ncollection",
+      "artificial_intelligence" = "artificial\nintelligence",
+      "machine_learning" = "machine\nlearning")) + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+bigram_agency_count_pterm
+
+ggsave("figures/bigram_agency_count_pterm.jpg", bigram_agency_count_pterm, width = 9, height = 6)
+
+unigram_agency_count_pterm = ggplot(unigram_pterm_doctype_counts_v2 %>% filter(Doctype == "AgencyRuling"), 
+                          aes(y = count, x = token, fill = Pterm)) + geom_bar(stat = "identity", position = "dodge") + labs(x = "Token", y = "Pseudo Log(Count)", title = "Unigram Usage in Final Agency Rules, by Presidential Administration") + scale_y_continuous(trans = pseudo_log_trans(sigma = 1)) + theme_minimal() + theme(legend.position="bottom") + labs(fill = "Presidential\nTerm") + theme(text = element_text(size = 14)) + scale_fill_manual(values = pres)
+
+unigram_agency_count_pterm 
+
+ggsave("figures/unigram_agency_count_pterm.jpg", unigram_agency_count_pterm, width = 9, height = 6)
+
+```
+
+
+
+
+##Key words in context
+
+```{r}
+
+# Use kwic() on the tokens object to locate keywords in context within corpus
+#key word is set to freedom, parameter called "pattern"; words before and after key word "freedom"
+kwic_results_eval <- kwic(fed_corpus_tokens_custom, pattern = "performance_evaluation", window = 10)
+
+# Display KWIC results
+print(kwic_results_eval)
+
+kwic_results_ai <- kwic(fed_corpus_tokens_custom, pattern = "ai", window = 10)
+
+# Display KWIC results
+print(kwic_results_ai)
+
+kwic_results_goveff <- kwic(fed_corpus_tokens_custom, pattern = "government_efficiency", window = 10)
+
+# Display KWIC results
+print(kwic_results_goveff)
+```
+
+
+
+subsetting data for kwic only looking at EOs:
+
+I used chatgpt to better understand how to subset my tokens for kwic() command.
+prompt: for the kwic() command, I want to subset my data based on one of the docvars included in the corpus I would prefer not to create a separate tokens object for this subset of data
+
+```{r}
+
+
+get_kwic_results <- function(pres, doc, keyword, windowsize){
+  token_subset = fed_corpus_tokens_custom[docvars(fed_corpus_tokens_custom, "president.identifier") == pres & docvars(fed_corpus_tokens_custom, "doctype") == doc]
+  kwic_output = kwic(token_subset, pattern = keyword, window = windowsize)
+  
+  # Add publication_date from docvars
+  kwic_df <- as.data.frame(kwic_output)
+  kwic_df_samp <- kwic_df %>% sample_n(20)
+  return(kwic_df_samp)
+}
+
+#data keyword
+get_kwic_results("joe-biden", "ExecOrder", "data", 10)
+
+get_kwic_results("donald-trump", "ExecOrder", "data", 10)
+
+get_kwic_results("barack-obama", "ExecOrder", "data", 10)
+
+get_kwic_results("george-w-bush", "ExecOrder", "data", 10)
+
+#evaluation keyword
+
+get_kwic_results("joe-biden", "ExecOrder", "evaluation", 5)
+
+get_kwic_results("donald-trump", "ExecOrder", "evaluation", 5)
+
+get_kwic_results("barack-obama", "ExecOrder", "evaluation", 5)
+
+get_kwic_results("george-w-bush", "ExecOrder", "evaluation", 10)
+
+```
+
+
+subsetting data for kwic only looking at Agency Rulings:
+
+```{r}
+
+#data analysis keyword
+get_kwic_results("joe-biden", "AgencyRuling", "data_analysis", 5)
+
+get_kwic_results("donald-trump", "AgencyRuling", "data_analysis", 5)
+
+get_kwic_results("barack-obama", "AgencyRuling", "data_analysis", 5)
+
+get_kwic_results("george-w-bush", "AgencyRuling", "data_analysis", 5)
+
+#performance evaluation keyword
+
+get_kwic_results("joe-biden", "AgencyRuling", "performance_evaluation", 5)
+
+get_kwic_results("donald-trump", "AgencyRuling", "performance_evaluation", 5)
+
+get_kwic_results("barack-obama", "AgencyRuling", "performance_evaluation", 5)
+
+get_kwic_results("george-w-bush", "AgencyRuling", "performance_evaluation", 5)
+```
+
+```{r}
+
+kwic_results_goveff_eo = kwic(fed_corpus_tokens_custom[docvars(fed_corpus_tokens_custom, "doctype") == "ExecOrder"],pattern = "government_efficiency", window = 10) 
+
+print(kwic_results_goveff_eo)
+
+kwic_results_goveff_eo_2 = kwic(fed_corpus_tokens_custom[docvars(fed_corpus_tokens_custom, "doctype") == "ExecOrder"],pattern = "doge", window = 10) 
+
+print(kwic_results_goveff_eo_2)
+```
+
+```{r}
+
+kwic_results_eff_eo = kwic(fed_corpus_tokens_custom[docvars(fed_corpus_tokens_custom, "doctype") == "ExecOrder"],pattern = "efficiency", window = 7) 
+
+print(kwic_results_eff_eo)
+
+kwic_results_eff_fed = kwic(fed_corpus_tokens_custom[docvars(fed_corpus_tokens_custom, "doctype") == "AgencyRuling"],pattern = "efficiency", window = 7) 
+
+#print(kwic_results_eff_fed)
+
+```
+
+counting the words across KWIC
+
+used chatgpt to better understand how to visualize this : 
+prompt: "using the conText R package, I want to use a particular pattern word to identify the context of my word in documents, and plot the counts of the surrounding words in the bargraph"
+
+```{r}
+
+plot_kwic_context_words <- function(toks, target_word, window_size = 5, top_n = 20) {
+  
+  # Step 1: Extract context
+  data_context_words <- tokens_context(
+    x = toks, 
+    pattern = target_word,
+    window = window_size, 
+    valuetype = "fixed",
+    case_insensitive = FALSE,
+    hard_cut = FALSE, 
+    verbose = FALSE
+  )
+
+  
+  context_tokens <- tokens(
+    data_context_words,
+    remove_punct = TRUE,
+    remove_numbers = TRUE,
+    remove_symbols = TRUE
+  ) %>% 
+    tokens_remove(stopwords("english")) %>% 
+    tokens_tolower() # optional: make everything lowercase
+  
+  # Step 4: Flatten tokens to a vector
+  context_vector <- unlist(context_tokens)
+  
+  # Step 5: Tabulate and filter
+  word_counts <- data.frame(table(context_vector)) %>%
+    filter(context_vector != target_word) %>%  # remove the target word itself
+    arrange(desc(Freq)) %>%
+    slice_head(n = top_n)
+  
+  # Step 6: Plot
+  word_plot = ggplot(word_counts, aes(x = reorder(context_vector, Freq), y = Freq)) +
+    geom_bar(stat = "identity", fill = "#0A1C40") +
+    coord_flip() + 
+    labs(x = "Context Words", y = "Frequency", title = paste("Top", top_n, "words around", target_word)) +
+    theme_minimal() + theme(text = element_text(size = 14))
+  
+  return(word_plot)
+}
+
+kwic_plot_ge = plot_kwic_context_words(fed_corpus_tokens_custom, "government_efficiency", 5, 10)
+
+kwic_plot_ge
+
+ggsave("figures/kwic/kwic_plot_ge.jpg", kwic_plot_ge)
+
+kwic_plot_ai_bigram = plot_kwic_context_words(fed_corpus_tokens_custom, "artificial_intelligence", 5, 10)
+
+kwic_plot_ai_bigram 
+
+ggsave("figures/kwic/kwic_plot_ai_bigram.jpg", kwic_plot_ai_bigram)
+
+kwic_plot_da = plot_kwic_context_words(fed_corpus_tokens_custom, "data_analysis", 5, 10)
+
+kwic_plot_da
+
+ggsave("figures/kwic/kwic_plot_da.jpg", kwic_plot_da)
+
+kwic_plot_dc = plot_kwic_context_words(fed_corpus_tokens_custom, "data_collection", 5, 10)
+
+kwic_plot_dc
+
+ggsave("figures/kwic/kwic_plot_dc.jpg", kwic_plot_dc)
+
+kwic_plot_ai = plot_kwic_context_words(fed_corpus_tokens_custom, "ai", 5, 10)
+
+kwic_plot_ai
+
+ggsave("figures/kwic/kwic_plot_ai.jpg", kwic_plot_ai)
+
+kwic_plot_perfeval = plot_kwic_context_words(fed_corpus_tokens_custom, "performance_evaluation", 5, 10)
+
+kwic_plot_perfeval
+
+ggsave("figures/kwic/kwic_plot_perfeval.jpg", kwic_plot_perfeval)
+
+kwic_plot_progeval = plot_kwic_context_words(fed_corpus_tokens_custom, "program_evaluation", 5, 10)
+
+kwic_plot_progeval
+
+ggsave("figures/kwic/kwic_plot_progeval.jpg", kwic_plot_progeval)
+
+```
+
+
+```{r}
+
+
+plot_kwic_context_phrase <- function(toks, target_word, window_size = 5, top_n = 10) {
+  
+  # Step 1: Extract context
+  data_context_words <- tokens_context(
+    x = toks, 
+    pattern = target_word,
+    window = window_size, 
+    valuetype = "fixed",
+    case_insensitive = FALSE,
+    hard_cut = FALSE, 
+    verbose = FALSE
+  )
+
+  data_context_phrase <- sapply(data_context_words, function(x) paste(x, collapse = " "), USE.NAMES = FALSE)
+  
+  # Step 4: Flatten tokens to a vector
+  context_vector <- unlist(data_context_phrase)
+  
+  # Step 5: Tabulate and filter
+  phrase_counts <- data.frame(table(context_vector)) %>%
+    arrange(desc(Freq)) %>%
+    slice_head(n = top_n)
+  
+  # Step 6: Plot
+  phrase_plot = ggplot(phrase_counts, aes(x = reorder(context_vector, Freq), y = Freq)) +
+    geom_bar(stat = "identity", fill = "#0A1C40") +
+    coord_flip() + 
+    labs(x = "Context Phrase", y = "Frequency", title = paste("Top", top_n, "phrases around", target_word)) +
+    theme_minimal() + theme(text = element_text(size = 14))
+  
+  return(phrase_plot)
+}
+
+kwic_plot_dc_phrase = plot_kwic_context_phrase(fed_corpus_tokens_custom, "data_collection", 5, 10)
+
+kwic_plot_dc_phrase
+
+ggsave("figures/kwic/kwic_plot_dc_phrase.jpg", kwic_plot_dc_phrase, width = 8, height = 5)
+
+
+kwic_plot_perfeval_phrase = plot_kwic_context_phrase(fed_corpus_tokens_custom, "performance_evaluation", 5, 10)
+
+kwic_plot_perfeval_phrase
+
+ggsave("figures/kwic/kwic_plot_perfeval_phrase.jpg", kwic_plot_perfeval_phrase, width = 8, height = 5)
+
+kwic_plot_ai_phrase = plot_kwic_context_phrase(fed_corpus_tokens, "ai", 5, 10)
+
+kwic_plot_ai_phrase
+
+ggsave("figures/kwic/kwic_plot_ai_phrase.jpg", kwic_plot_ai_phrase, width = 8, height = 5)
+
+kwic_plot_ai_bigram_phrase = plot_kwic_context_phrase(fed_corpus_tokens_custom, "artificial_intelligence", 5, 10)
+
+kwic_plot_ai_bigram_phrase
+
+ggsave("figures/kwic/kwic_plot_ai_bigram_phrase.jpg", kwic_plot_ai_bigram_phrase, width = 8, height = 5)
+
+kwic_plot_ge_phrase = plot_kwic_context_phrase(fed_corpus_tokens_custom, "government_efficiency", 5, 10)
+
+kwic_plot_ge_phrase
+
+ggsave("figures/kwic/kwic_plot_ge_phrase.jpg", kwic_plot_ge_phrase, width = 8, height = 5)
+
+
+
+
+```
+
+
+old code:
+
+```{r}
+data_context_words <- tokens_context(fed_corpus_tokens_custom, "machine_learning",
+window = 5L, valuetype = "fixed", case_insensitive = FALSE,
+hard_cut = FALSE, verbose = FALSE) 
+
+data_context_words_tokens = tokens(data_context_words, remove_punct = TRUE,
+    remove_numbers = TRUE,
+    remove_symbols = TRUE) %>% 
+    tokens_remove(stopwords("english")) %>% 
+    tokens_tolower()
+
+data_context_words_vector <- unlist(data_context_words_tokens)
+
+ctx_words <- tokens(data_context_words$context, remove_punct = TRUE, remove_numbers = TRUE, remove_symbols = TRUE) %>% tokens_remove(stopwords("english")) %>% unlist()
+
+# Count them
+data_word_counts <- data.frame(table(ctx_words)) %>% filter(ctx_words != "data")
+  arrange(desc(Freq)) %>%
+  slice(1:20)
+
+```

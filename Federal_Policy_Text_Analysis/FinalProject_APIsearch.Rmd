@@ -1,0 +1,607 @@
+---
+title: "TAD_FinalProject_APIsearch"
+author: "Katharyn Loweth"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(yaml)
+library(quanteda)
+library(jsonlite)
+library(lubridate)
+```
+
+```{r}
+setwd("/Users/katharynloweth/Desktop/TextAsData/TAD_FinalProject")
+
+rm(list = ls())
+
+```
+
+
+### Federal Register API
+
+```{r}
+
+fr_url_rule = "https://www.federalregister.gov/api/v1/documents.json?fields[]=abstract&fields[]=action&fields[]=agencies&fields[]=agency_names&fields[]=body_html_url&fields[]=dates&fields[]=disposition_notes&fields[]=excerpts&fields[]=executive_order_notes&fields[]=executive_order_number&fields[]=explanation&fields[]=json_url&fields[]=president&fields[]=presidential_document_number&fields[]=publication_date&fields[]=signing_date&fields[]=title&fields[]=topics&fields[]=type&per_page=1000&order=oldest&conditions[term]=%22government%20efficiency%22&conditions[publication_date][year]=2025&conditions[type][]=RULE&conditions[president][]="
+
+FR_data_rule <-fromJSON(fr_url_rule)$results %>% as.data.frame()
+
+fr_url_eo = "https://www.federalregister.gov/api/v1/documents.json?fields[]=abstract&fields[]=action&fields[]=agencies&fields[]=agency_names&fields[]=body_html_url&fields[]=dates&fields[]=disposition_notes&fields[]=excerpts&fields[]=executive_order_notes&fields[]=executive_order_number&fields[]=explanation&fields[]=json_url&fields[]=president&fields[]=presidential_document_number&fields[]=publication_date&fields[]=signing_date&fields[]=title&fields[]=topics&fields[]=type&per_page=1000&order=oldest&conditions[term]=%22government%20efficiency%22&conditions[publication_date][year]=2025&conditions[type][]=PRESDOCU&conditions[president][]="
+
+FR_data_eo <-fromJSON(fr_url_eo)$results %>% as.data.frame()
+
+```
+
+creating function for results that have less than 1,000 entries; set equal to the beginning of the bush administration (January 20, 2001)
+```{r}
+
+get_search_results = function(term, type){
+  type_upper = toupper(type)
+  encoded_term <- URLencode(paste0('"', term, '"'))
+  
+  base_url <- paste0(
+    "https://www.federalregister.gov/api/v1/documents.json?",
+    "fields[]=abstract&fields[]=action&fields[]=agencies&fields[]=agency_names&fields[]=body_html_url&",
+    "fields[]=dates&fields[]=disposition_notes&fields[]=excerpts&fields[]=executive_order_notes&",
+    "fields[]=executive_order_number&fields[]=explanation&fields[]=json_url&fields[]=president&",
+    "fields[]=presidential_document_number&fields[]=publication_date&fields[]=signing_date&",
+    "fields[]=regulation_id_numbers&fields[]=title&fields[]=topics&fields[]=type&per_page=1000&order=oldest&",
+    "&conditions[publication_date][gte]=2001-01-20&",
+    "conditions[term]=", encoded_term, 
+    "&conditions[type][]=", type_upper
+
+  )
+  df = fromJSON(base_url)$results %>% as.data.frame()
+  return(df)
+}
+
+
+```
+
+
+```{r}
+#mentions of "government efficiency" in agency final rulings and EOs since the beginning of the obama administration
+agency_goveff_rule = get_search_results("government efficiency", "rule")
+pres_goveff_eo = get_search_results("government efficiency", "presdocu")
+
+#mentions of "government evaluation" in agency final rulings and EOs
+
+agency_goveval_rule = get_search_results("government evaluation", "rule")
+pres_goveval_eo = get_search_results("government evaluation", "presdocu")
+
+#mentions of "data driven" in agency final rulings and EOs
+
+agency_datadriven_rule = get_search_results("data driven", "rule")
+pres_datadriven_eo = get_search_results("data driven", "presdocu")
+
+#mentions of "data analysis" in agency final rulings and EOs #moving data analysis for rulings down because there are more than 1000
+
+pres_dataanalysis_eo = get_search_results("data analysis", "presdocu")
+
+#mentions of "performance evaluation" in agency final rulings at EOs
+
+agency_perfeval_rule = get_search_results("performance evaluation", "rule")
+pres_perfeval_eo = get_search_results("performance evaluation", "presdocu")
+
+#mentions of "program evaluation" in agency final rulings at EOs
+agency_progeval_rule = get_search_results("program evaluation", "rule")
+pres_progeval_eo = get_search_results("program evaluation", "presdocu")
+
+
+```
+
+
+for results that have more than 1,000 responses:
+function that returns results by year
+
+```{r}
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+
+# Function to get data for a given year
+get_yearly_results <- function(year, term, type) {
+  start_date <- paste0(year, "-01-01")
+  end_date <- paste0(year, "-12-31")
+  type_upper <- toupper(type)
+  
+  encoded_term <- URLencode(paste0('"', term, '"'))
+  
+  base_url <- paste0(
+    "https://www.federalregister.gov/api/v1/documents.json?",
+    "fields[]=abstract&fields[]=action&fields[]=agencies&fields[]=agency_names&fields[]=body_html_url&",
+    "fields[]=dates&fields[]=disposition_notes&fields[]=excerpts&fields[]=executive_order_notes&",
+    "fields[]=executive_order_number&fields[]=explanation&fields[]=json_url&fields[]=president&",
+    "fields[]=presidential_document_number&fields[]=publication_date&fields[]=signing_date&",
+    "fields[]=regulation_id_numbers&fields[]=title&fields[]=topics&fields[]=type&per_page=1000&order=oldest&",
+    "conditions[term]=", encoded_term, 
+    "&conditions[type][]=", type_upper,
+    "&conditions[publication_date][gte]=", start_date,
+    "&conditions[publication_date][lte]=", end_date
+  )
+  #print(base_url)
+
+  # Get first page to determine total pages
+  res <- GET(paste0(base_url, "&page=1"))
+  
+  
+  if (http_error(res)) {
+    message("Request failed for ", term, " in ", year, " (HTTP ", status_code(res), ")")
+    return(NULL)
+  }
+  
+  data <- content(res, as = "parsed", simplifyDataFrame = TRUE)
+  
+  if (length(data$results) == 0) {
+    return(NULL)
+  }
+
+  total_pages <- data$total_pages
+  yearly_results <- list()
+  
+  for (page in 1:total_pages) {
+    cat("Year:", year, "- Page:", page, "of", total_pages, "\n")
+    res <- GET(paste0(base_url, "&page=", page))
+    parsed <- content(res, as = "parsed", simplifyDataFrame = TRUE)
+    yearly_results[[page]] <- parsed$results
+  }
+  
+  bind_rows(yearly_results)
+}
+
+# Loop over years
+years <- 2001:2025
+
+agency_evaluation_rule <- lapply(years, get_yearly_results, term = "evaluation", type = "rule")
+
+# Combine all years into one data frame
+agency_evaluation_rule_df <- bind_rows(agency_evaluation_rule)
+
+
+
+#head(agency_evaluation_rule_df)
+
+pres_evaluation_eo <- lapply(years, get_yearly_results, term = "evaluation", type = "presdocu")
+pres_evaluation_eo_df <- bind_rows(pres_evaluation_eo)
+
+```
+
+
+```{r}
+
+
+agency_efficiency_rule <- lapply(years, get_yearly_results, term = "efficiency", type = "rule")
+
+agency_efficiency_rule_df <- bind_rows(agency_efficiency_rule)
+
+
+#head(final_eff_df)
+
+pres_efficiency_eo <- lapply(years, get_yearly_results, term = "efficiency", type = "presdocu")
+pres_efficiency_eo_df <- bind_rows(pres_efficiency_eo)
+
+
+```
+
+```{r}
+
+agency_dataanalysis_rule = lapply(years, get_yearly_results, term = "data analysis", type = "rule")
+agency_dataanalysis_rule_df <- bind_rows(agency_dataanalysis_rule)
+
+```
+
+## 4/18 adding "data science" and "artificial intelligence" as terms to include
+```{r}
+pres_datascience_eo = get_search_results("data science", "presdocu")
+agency_datascience_rule = get_search_results("data science", "rule")
+
+pres_AI_eo = get_search_results("artificial intelligence", "presdocu")
+agency_AI_rule = get_search_results("artificial intelligence", "rule")
+
+agency_ml_rule = get_search_results("machine learning", "rule")
+pres_ml_eo = get_search_results("machine learning", "presdocu")
+```
+
+##4/27 looking at data collection, analysis, and AI results
+```{r}
+pres_datacoll_eo = get_search_results("data collection", "presdocu")
+
+agency_datacoll_rule = lapply(years, get_yearly_results, term = "data collection", type = "rule")
+agency_datacoll_rule_df <- bind_rows(agency_datacoll_rule)
+
+pres_AI_eo = get_search_results("AI", "presdocu")
+agency_AI_rule = get_search_results("AI", "rule")
+
+
+
+pres_analysis_eo = get_search_results("analysis", "presdocu")
+
+#huge - not including
+agency_analysis_rule = lapply(years, get_yearly_results, term = "analysis", type = "rule")
+agency_analysis_rule_df <- bind_rows(agency_analysis_rule)
+```
+#5/1 lookup of evidence building, evaluation plan, evaluation policy, data management, and evidence
+
+```{r}
+#mentions of "evidence building" in agency final rulings at EOs
+agency_evbuild_rule = get_search_results("evidence building", "rule")
+pres_evbuild_eo = get_search_results("evidence building", "presdocu")
+
+#mentions of "evaluation plan" in agency final rulings at EOs
+agency_evalplan_rule = get_search_results("evaluation plan", "rule")
+pres_evalplan_eo = get_search_results("evaluation plan", "presdocu")
+
+#mentions of "evaluation policy" in agency final rulings at EOs
+agency_evalpol_rule = get_search_results("evaluation policy", "rule")
+pres_evalpol_eo = get_search_results("evaluation policy", "presdocu")
+
+#mentions of "evaluation policy" in agency final rulings at EOs
+agency_dm_rule = get_search_results("data management", "rule")
+pres_dm_eo = get_search_results("data management", "presdocu")
+
+pres_ev_eo = get_search_results("evidence", "presdocu")
+
+agency_evidence_rule <- lapply(years, get_yearly_results, term = "evidence", type = "rule")
+
+# Combine all years into one data frame
+agency_evidence_rule_df <- bind_rows(agency_evidence_rule)
+
+```
+
+## 4/18 specific terms to look for in executive orders: data
+
+```{r}
+
+pres_data_eo = get_search_results("data", "presdocu")
+
+
+```
+
+##compiling datasets together
+```{r}
+
+all_agency_rules = bind_rows(agency_efficiency_rule_df, agency_evaluation_rule_df, agency_progeval_rule, agency_perfeval_rule, agency_dataanalysis_rule, agency_datadriven_rule, agency_goveff_rule, agency_goveval_rule)
+
+all_agency_rules_unique = all_agency_rules %>% filter(president$name != "George W. Bush") %>% distinct(title,body_html_url, publication_date, president) %>% mutate(doctype = "AgencyRuling")
+
+#all_agency_rules_unique$body_text = html_text(read_html(all_agency_rules_unique$body_html_url))
+
+all_pres_eo = bind_rows(pres_efficiency_eo_df, pres_evaluation_eo_df, pres_progeval_eo, pres_perfeval_eo, pres_dataanalysis_eo, pres_datadriven_eo, pres_goveff_eo, pres_goveval_eo)
+
+all_pres_eo_unique = all_pres_eo %>% filter(president$name != "George W. Bush") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+all_texts = bind_rows(all_agency_rules_unique, all_pres_eo_unique)
+```
+
+#4/19 pulling all records after initial pull of data on 4/6
+
+```{r}
+
+all_texts$publication_date_ref = as.Date(all_texts$publication_date, "%Y-%m-%d")
+
+all_texts_04.2025 = all_texts %>% filter(publication_date_ref > as.Date("2025-04-06"))
+```
+
+
+## 4/18 checking if the new adds are already in dataframe
+```{r}
+
+all_pres_eo_418 = bind_rows(pres_data_eo, pres_ml_eo, pres_AI_eo, pres_datascience_eo)
+
+all_pres_eo_unique_418 = all_pres_eo_418 %>% filter(president$name != "George W. Bush") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+all_pres_eo_unique_418_new = anti_join(all_pres_eo_unique_418, all_pres_eo_unique)
+
+all_agency_rules_418 = bind_rows(agency_ml_rule, agency_datascience_rule, agency_AI_rule)
+
+all_agency_rules_unique_418 = all_agency_rules_418 %>% filter(president$name != "George W. Bush") %>% distinct(title,body_html_url, publication_date, president) %>% mutate(doctype = "AgencyRuling")
+
+all_agency_rules_unique_418_new = anti_join(all_agency_rules_unique_418, all_agency_rules_unique)
+
+all_texts_418 = bind_rows(all_agency_rules_unique_418_new, all_pres_eo_unique_418_new)
+
+all_texts_check = anti_join(all_texts_04.2025, all_texts_418)
+
+all_texts_419 = bind_rows(all_texts_418, all_texts_check)
+```
+
+
+## 4/19 looking at bush records only
+```{r}
+
+all_agency_rules = bind_rows(agency_efficiency_rule_df, agency_evaluation_rule_df, agency_progeval_rule, agency_perfeval_rule, agency_dataanalysis_rule, agency_datadriven_rule, agency_goveff_rule, agency_goveval_rule, agency_ml_rule, agency_datascience_rule, agency_AI_rule)
+
+all_agency_rules_unique_bush = all_agency_rules %>% filter(president$name == "George W. Bush") %>% distinct(title,body_html_url, publication_date, president) %>% mutate(doctype = "AgencyRuling")
+
+#all_agency_rules_unique$body_text = html_text(read_html(all_agency_rules_unique$body_html_url))
+
+all_pres_eo = bind_rows(pres_efficiency_eo_df, pres_evaluation_eo_df, pres_progeval_eo, pres_perfeval_eo, pres_dataanalysis_eo, pres_datadriven_eo, pres_goveff_eo, pres_goveval_eo, pres_data_eo, pres_ml_eo, pres_AI_eo, pres_datascience_eo)
+
+all_pres_eo_unique_bush = all_pres_eo %>% filter(president$name == "George W. Bush") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+all_bush_texts = bind_rows(all_agency_rules_unique_bush, all_pres_eo_unique_bush)
+```
+
+##pulling full text of documents
+
+I used chatgpt to help use the output of the federal register API to download the full text and initially clean it. 
+prompt: I have a dataset based on queries from federal register. Using the body_html_url feature, I want to pull the body text from online and add it as a field to my dataset saved as body_text. I want to make this code a function. to this function i want to add something that prints everytime it gets through 5% of the inputted data frame
+
+```{r}
+
+library(rvest)
+
+get_body_text <- function(text_url) {
+  tryCatch({
+    # Read the HTML page
+    html_doc <- read_html(text_url)
+    
+    # Extract all text from the page
+    body_text <- html_text(html_doc, trim = TRUE)
+    
+    # Clean up whitespace
+    body_text_clean <- gsub("\r|\n", " ", body_text) 
+    body_text_clean <- gsub("\\s{2,}", " ", body_text_clean)
+    body_text_clean = gsub("[•●▪§]", "", body_text_clean)
+    body_text_clean <- trimws(body_text_clean)
+    
+    return(body_text_clean)
+  }, error = function(e) {
+    warning(paste("Failed to fetch or parse:", text_url))
+    return(NA)
+  })
+}
+
+
+get_body_text_with_progress <- function(urls) {
+  total <- length(urls)
+  checkpoints <- seq(0.05, 1, by = 0.05) * total
+  results <- character(total)
+  
+  for (i in seq_along(urls)) {
+    results[i] <- get_body_text(urls[i])
+    
+    # Print progress at 5% intervals
+    if (i %in% floor(checkpoints)) {
+      message(sprintf("Processed %d of %d (%.0f%%)", i, total, (i / total) * 100))
+    }
+  }
+  
+  return(results)
+}
+
+#all_text_samp = all_texts %>% head(500)
+
+#all_text_samp$body_text <- get_body_text_with_progress(all_text_samp$body_html_url)
+
+#all_texts_419$body_text <- get_body_text_with_progress(all_texts_419$body_html_url)
+
+
+
+
+```
+
+
+
+looking at sample data
+```{r}
+
+sample_corpus = corpus(all_text_samp$body_text)
+
+# Tokenize the corpus
+body_tokens_ex <- tokens(sample_corpus, remove_punct = TRUE, remove_symbols = TRUE, remove_numbers = TRUE)
+
+
+kwic_results <- kwic(body_tokens_ex , pattern = "efficiency", window = 5)
+
+# Display KWIC results
+print(kwic_results)
+
+kwic_df <- as_tibble(kwic_results)
+print(kwic_df)
+
+
+```
+
+##Full data:takes about 16 hours to run!
+```{r}
+
+
+all_texts$body_text <- get_body_text_with_progress(all_texts$body_html_url)
+
+```
+
+## bush dataset
+
+```{r}
+
+all_bush_texts$body_text <- get_body_text_with_progress(all_bush_texts$body_html_url)
+
+```
+
+```{r}
+#write.csv(all_texts, "TAD_finalproject_corpus.csv", row.names = FALSE)
+write.csv(all_texts_419, "TAD_finalproject_corpus_04.19.csv", row.names = FALSE)
+write.csv(all_bush_texts, "TAD_finalproject_corpus_bush.csv", row.names = FALSE)
+```
+
+##4/18: merging original dataset with second pull of data
+
+```{r}
+data1 = read.csv("TAD_finalproject_corpus.csv")
+
+data2 = read.csv("TAD_finalproject_corpus_04.19.csv")
+
+data2 = data2 %>% select(-c(publication_date_ref))
+
+data3 = read.csv("TAD_finalproject_corpus_bush.csv")
+
+full_data_0420 = rbind(data1, data2, data3) 
+
+write.csv(full_data_0420, "TAD_finalproject_corpus_2.csv", row.names = FALSE)
+```
+
+## 4/27 checking whether data collection pull or analysis EO are already in corpus
+```{r}
+
+fed = read.csv("TAD_finalproject_corpus_2.csv")
+
+fed_fil = fed %>% select(title, body_html_url, publication_date, doctype)
+
+agency_datacoll_rule_df_v2 = agency_datacoll_rule_df %>% filter(president$identifier != "william-j-clinton") %>% distinct(title,body_html_url, publication_date, president) %>% mutate(doctype = "AgencyRuling")
+
+pres_datacoll_eo_v2 = pres_datacoll_eo %>% filter(president$identifier != "william-j-clinton") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+datacoll_pull = bind_rows(agency_datacoll_rule_df_v2, pres_datacoll_eo_v2)
+
+datacoll_rem = anti_join(datacoll_pull, fed_fil)
+
+pres_analysis_eo_v2 = pres_analysis_eo %>% filter(president$identifier != "william-j-clinton") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+pres_analysis_eo_rem = anti_join(pres_analysis_eo_v2, fed_fil)
+
+pres_analysis_eo_rem_v2 = anti_join(pres_analysis_eo_rem, datacoll_rem)
+
+
+agency_AI_rule_v2 = agency_AI_rule %>% filter(president$identifier != "william-j-clinton") %>% distinct(title,body_html_url, publication_date, president) %>% mutate(doctype = "AgencyRuling")
+
+pres_AI_eo_v2 = pres_AI_eo %>% filter(president$identifier != "william-j-clinton") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+AI_pull = bind_rows(agency_AI_rule_v2, pres_AI_eo_v2)
+
+AI_pull_rem = anti_join(AI_pull, fed_fil)
+
+
+
+```
+
+#04/27 adding the data collection search and the analysis EO search to dataset
+
+```{r}
+
+#datacoll_rem$body_text <- get_body_text_with_progress(datacoll_rem$body_html_url)
+
+#pres_analysis_eo_rem_v2$body_text <- get_body_text_with_progress(pres_analysis_eo_rem_v2$body_html_url)
+
+AI_pull_rem$body_text <- get_body_text_with_progress(AI_pull_rem$body_html_url)
+
+datapull_0427 = bind_rows(datacoll_rem, pres_analysis_eo_rem_v2)
+
+write.csv(datapull_0427, "TAD_finalproject_corpus_04.27.csv", row.names = FALSE)
+
+data4 = read.csv("TAD_finalproject_corpus_04.27.csv")
+
+full_data_0427 = rbind(fed, data4)
+
+write.csv(full_data_0427, "TAD_finalproject_corpus_3.csv", row.names = FALSE)
+
+
+fed_2 = read.csv("TAD_finalproject_corpus_3.csv")
+
+write.csv(AI_pull_rem, "TAD_finalproject_aipull_0427.csv", row.names = FALSE)
+
+data5 = read.csv("TAD_finalproject_aipull_0427.csv")
+
+full_data_0427_2= rbind(fed_2, data5)
+
+write.csv(full_data_0427_2, "TAD_finalproject_corpus_FINAL.csv", row.names = FALSE)
+
+```
+
+
+#5/1
+```{r}
+
+fed = read.csv("TAD_finalproject_corpus_FINAL.csv")
+
+
+fed_fil = fed %>% select(title, body_html_url, publication_date, doctype)
+
+
+#mentions of "evidence building" in agency final rulings at EOs
+agency_evbuild_rule = get_search_results("evidence building", "rule")
+pres_evbuild_eo = get_search_results("evidence building", "presdocu")
+
+#mentions of "evaluation plan" in agency final rulings at EOs
+agency_evalplan_rule = get_search_results("evaluation plan", "rule")
+pres_evalplan_eo = get_search_results("evaluation plan", "presdocu")
+
+#mentions of "evaluation policy" in agency final rulings at EOs
+agency_evalpol_rule = get_search_results("evaluation policy", "rule")
+pres_evalpol_eo = get_search_results("evaluation policy", "presdocu")
+
+#mentions of "evaluation policy" in agency final rulings at EOs
+agency_dm_rule = get_search_results("data management", "rule")
+pres_dm_eo = get_search_results("data management", "presdocu")
+
+pres_ev_eo = get_search_results("evidence", "presdocu")
+
+agency_evidence_rule <- lapply(years, get_yearly_results, term = "evidence", type = "rule")
+
+# Combine all years into one data frame
+agency_evidence_rule_df <- bind_rows(agency_evidence_rule)
+
+
+agency_rule_501 = bind_rows(agency_evbuild_rule, agency_evalplan_rule, agency_evalpol_rule, agency_evidence_rule, agency_dm_rule)
+
+agency_rule_501_unique = agency_rule_501 %>% filter(president$identifier != "william-j-clinton") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "AgencyRuling")
+
+pres_501 = bind_rows(pres_evbuild_eo, pres_evalplan_eo, pres_evalpol_eo, pres_dm_eo, pres_ev_eo)
+
+pres_501_unique = pres_501 %>% filter(president$identifier != "william-j-clinton") %>% distinct(title, publication_date, body_html_url, president) %>% mutate(doctype = "ExecOrder")
+
+all_unique_501 = bind_rows(agency_rule_501_unique, pres_501_unique)
+
+all_unique_501_new = anti_join(all_unique_501, fed_fil)
+
+
+
+```
+
+
+```{r}
+
+all_unique_501_new$body_text <- get_body_text_with_progress(all_unique_501_new$body_html_url)
+
+write.csv(all_unique_501_new, "TAD_finalproject_corpus_0501.csv", row.names = FALSE)
+
+
+```
+
+
+## combining 5/1 with full dataset
+```{r}
+
+data_0501 = read.csv("TAD_finalproject_corpus_0501.csv")
+
+full_data_0501 = bind_rows(fed, data_0501)
+
+write.csv(full_data_0501, "TAD_finalproject_corpus_FINAL_0501.csv", row.names = FALSE)
+
+```
+
+```{r}
+
+all_agency_except_eff = bind_rows(agency_evaluation_rule_df, agency_progeval_rule, agency_perfeval_rule, agency_dataanalysis_rule, agency_datadriven_rule, agency_goveff_rule, agency_goveval_rule, agency_ml_rule, agency_datascience_rule, agency_AI_rule, agency_evbuild_rule, agency_evalplan_rule, agency_evalpol_rule, agency_evidence_rule, agency_dm_rule, agency_datacoll_rule_df)
+
+all_agency_except_eff_2 = all_agency_except_eff %>% distinct(title, publication_date, body_html_url, president) 
+
+efficiency_rem = anti_join(agency_efficiency_rule_df,all_agency_except_eff_2)
+
+fed = read.csv("TAD_finalproject_corpus_FINAL_0501.csv")
+
+
+fed_0501 = anti_join(fed, efficiency_rem)
+
+write.csv(fed_0501, "TAD_finalproject_corpus_FINAL_050125.csv", row.names = FALSE)
+```

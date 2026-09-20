@@ -1,0 +1,705 @@
+---
+title: "FinalProject_WordEmbeddings"
+author: "Katharyn Loweth"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## word embeddings
+
+reducing dataframe to only include documents that include at least one of they keywords for analysis
+
+taking out data and evaluation because of their frequency in the dataframe plus being reflected in other keywords
+
+```{r}
+library(tidyverse) # loads dplyr, ggplot2, and others
+library(stringr) # to handle text elements
+library(tidytext) # includes set of functions useful for manipulating text
+library(text2vec) # for word embedding implementation
+library(widyr) # for reshaping the text data
+library(irlba) # for svd
+library(here)
+library(quanteda)
+library(ggplot2)
+library(conText)
+
+```
+
+```{r}
+setwd("/Users/katharynloweth/Desktop/TextAsData/TAD_FinalProject")
+
+#clearing environment
+rm(list = ls())
+
+#loading data
+fed = read.csv("TAD_finalproject_corpus_FINAL.csv")
+glimpse(fed)
+#str(fed)
+table(fed$president.identifier) #one bill clinton record
+fed = fed %>% filter(fed$president.identifier != "william-j-clinton")
+```
+
+```{r}
+#creating ID
+fed$id <- 1:nrow(fed)
+
+#changing format of date variable so that it is recognized as a date
+fed$publication_date_ref = as.Date(fed$publication_date, "%Y-%m-%d")
+#typeof(fed$publication_date_ref)
+#head(fed$publication_date_ref)
+fed$publication_year = format(fed$publication_date_ref, "%Y")
+#head(fed$publication_year)
+fed$publication_monthyear = format(fed$publication_date_ref, "%m-%Y")
+
+
+fed = fed %>% mutate(presidential_term = case_when((publication_date_ref < as.Date("2005-01-20") & fed$president.identifier == "george-w-bush") ~ "Bush-1",
+                                                   (publication_date_ref >= as.Date("2005-01-20") & fed$president.identifier == "george-w-bush") ~ "Bush-2",
+                                                   (publication_date_ref < as.Date("2013-01-20") & fed$president.identifier == "barack-obama") ~ "Obama-1",
+                                                   (publication_date_ref >= as.Date("2013-01-20") & fed$president.identifier == "barack-obama") ~ "Obama-2",
+                                                   (publication_date_ref < as.Date("2021-01-20") & fed$president.identifier == "donald-trump") ~ "Trump-1",
+                                                   (fed$president.identifier == "joe-biden") ~ "Biden", 
+                                                   (publication_date_ref >= as.Date("2025-01-20") &fed$president.identifier == "donald-trump") ~ "Trump-2"), 
+                     pres_party = case_when(fed$president.identifier %in% c("george-w-bush", "donald-trump") ~ "republican", fed$president.identifier %in% c("barack-obama","joe-biden") ~ "democrat"))
+
+```
+
+Creating corpus
+```{r}
+fed_corpus <- corpus(fed, text_field = "body_text")
+#names(docvars(fed_corpus))
+
+```
+
+functions needed for code:
+```{r}
+remove_words = c("document", "section", "headings", "ii", "iii", "iv", "vi", "vii", "v","viii", "ix", "fuel_efficiency", "energy_efficiency")
+
+junk_patterns <- c(
+  "^[0-9]+$",              # pure numbers like 2020
+  "^[0-9\\-]+$",           # numbers with dashes like 123-456
+  "^[0-9]{3,}-[0-9]{3,}",  # phone-number-like patterns
+  "^[^a-z]+$",             # non-alphabetic strings
+  "^[a-z]*-[0-9a-z]+$",    # alphanumeric with dash like n-1a, abc-123
+  "^[0-9a-z]+-[a-z]+$"     # variants like 1a-test or a1-b
+)
+
+prepping_tokens_we = function(c, words_to_remove, mtf, mdf){
+  
+  t = tokens(c, what = "word", remove_punct = TRUE, remove_numbers = TRUE, remove_symbols = TRUE, remove_separators = TRUE) %>% tokens_tolower() %>% tokens_remove(pattern = junk_patterns, valuetype = "regex")
+  f = dfm(t, verbose = FALSE) %>% 
+  dfm_remove(c(stopwords(language = "en"), words_to_remove)) %>% 
+  dfm_trim(min_termfreq = mtf, termfreq_type = "count", max_docfreq = mdf, docfreq_type = "prop") %>%
+  featnames() 
+  
+  tokens_pad = tokens_select(t,
+                            f,
+                            padding = TRUE)
+  return(tokens_pad)
+}
+
+
+
+
+
+glove_modeling = function(toks_feats, dimensions, window_size, fcm_type, n_iterations){
+  glove <- GlobalVectors$new(rank = dimensions, #dim
+                           x_max = 10,
+                           learning_rate = 0.05)
+  
+  mat = fcm(toks_feats, 
+                context = "window", 
+                window = window_size, 
+                count = fcm_type, 
+                tri = FALSE)
+  start = Sys.time()
+  
+  glove_fit = glove$fit_transform(mat, 
+                               n_iter = n_iterations,
+                               convergence_tol = 1e-3, 
+                               n_threads = parallel::detectCores())
+  end = Sys.time()
+  
+  print(end-start)
+  
+  
+  word_vectors_context <- glove$components
+  
+  word_vectors <- glove_fit + t(word_vectors_context)
+  return(word_vectors)
+}
+
+
+
+
+
+
+find_nearest <- function(word, pretrained_glove_model, top_n, pterm) {
+  focusword = pretrained_glove_model[word, , drop = FALSE]
+  n_words = find_nns(target_embedding = focusword, 
+                     pre_trained = pretrained_glove_model, N = top_n + 1,
+                     candidates = NULL, norm = "l2", stem = FALSE)
+  n_words_df = as.data.frame(n_words) %>% filter(n_words != word) 
+  colnames(n_words_df) = c(pterm)
+  return(n_words_df)
+  
+}
+```
+
+
+## breaking corpus into administration and party buckets
+```{r}
+#by administration
+bush_first_corpus <- corpus_subset(fed_corpus, presidential_term == "Bush-1") 
+bush_second_corpus <-corpus_subset(fed_corpus, presidential_term == "Bush-2") 
+obama_first_corpus <- corpus_subset(fed_corpus, presidential_term == "Obama-1") 
+obama_second_corpus <- corpus_subset(fed_corpus, presidential_term == "Obama-2") 
+trump_corpus <- corpus_subset(fed_corpus, presidential_term == "Trump-1" | presidential_term == "Trump-2") 
+biden_corpus <- corpus_subset(fed_corpus, presidential_term == "Biden") 
+
+
+
+```
+
+## tokenizing/prepping subsets of data for word embeddings
+
+
+```{r}
+
+
+
+bush_1_toks_feats = prepping_tokens_we(bush_first_corpus, remove_words, 5, 0.99)
+bush_2_toks_feats = prepping_tokens_we(bush_second_corpus, remove_words, 5, 0.99)
+obama_1_toks_feats = prepping_tokens_we(obama_first_corpus, remove_words, 5, 0.99)
+obama_2_toks_feats = prepping_tokens_we(obama_second_corpus, remove_words, 5, 0.99)
+trump_toks_feats = prepping_tokens_we(trump_corpus, remove_words, 5, 0.99)
+biden_toks_feats = prepping_tokens_we(biden_corpus, remove_words, 5, 0.99)
+
+#head(obama_1_toks_feats)
+
+
+
+```
+
+#saving token files 
+```{r}
+
+saveRDS(bush_1_toks_feats, file = "token_files/bush_1_toks_feats.rds")
+saveRDS(bush_2_toks_feats, file = "token_files/bush_2_toks_feats.rds")
+saveRDS(obama_1_toks_feats, file = "token_files/obama_1_toks_feats.rds")
+saveRDS(obama_2_toks_feats, file = "token_files/obama_2_toks_feats.rds")
+saveRDS(trump_toks_feats, file = "token_files/trump_toks_feats.rds")
+saveRDS(biden_toks_feats, file = "token_files/biden_toks_feats.rds")
+
+```
+
+##create glove word embeddings
+#start here if working with token object files
+```{r}
+# Construct the feature co-occurrence matrix for our tokens object
+
+#bush_1_toks_feats = readRDS("token_files/bush_1_toks_feats.rds")
+#bush_2_toks_feats = readRDS("token_files/bush_2_toks_feats.rds")
+#obama_1_toks_feats = readRDS("token_files/obama_1_toks_feats.rds")
+#obama_2_toks_feats = readRDS("token_files/obama_2_toks_feats.rds")
+#trump_toks_feats = readRDS("token_files/trump_toks_feats.rds")
+#biden_toks_feats = readRDS("token_files/biden_toks_feats.rds")
+
+obama_1_glove_results = glove_modeling(obama_1_toks_feats, 300, 5, "frequency", 12)
+
+obama_2_glove_results = glove_modeling(obama_2_toks_feats, 300, 5, "frequency",12)
+
+bush_1_glove_results = glove_modeling(bush_1_toks_feats, 300, 5, "frequency",12)
+
+bush_2_glove_results = glove_modeling(bush_2_toks_feats, 300, 5, "frequency",12)
+
+trump_glove_results = glove_modeling(trump_toks_feats, 300, 5, "frequency", 12)
+
+biden_glove_results = glove_modeling(biden_toks_feats, 300, 5, "frequency", 12)
+
+saveRDS(obama_1_glove_results, file = "glove_models/obama_1_glove_results.rds")
+saveRDS(obama_2_glove_results, file = "glove_models/obama_2_glove_results.rds")
+saveRDS(bush_1_glove_results, file = "glove_models/bush_1_glove_results.rds")
+saveRDS(bush_2_glove_results, file = "glove_models/bush_2_glove_results.rds")
+saveRDS(trump_glove_results, file = "glove_models/trump_glove_results.rds")
+saveRDS(biden_glove_results, file = "glove_models/biden_glove_results.rds")
+
+
+# features?
+#head(rownames(obama_1_glove_results))
+
+#class(obama_1_glove_results)
+
+
+
+#weighted versions
+
+
+obama_1_glove_results_wt = glove_modeling(obama_1_toks_feats, 300, 5, "weighted", 12)
+
+obama_2_glove_results_wt = glove_modeling(obama_2_toks_feats, 300, 5, "weighted",12)
+
+bush_1_glove_results_wt = glove_modeling(bush_1_toks_feats, 300, 5, "weighted",12)
+
+bush_2_glove_results_wt = glove_modeling(bush_2_toks_feats, 300, 5, "weighted",12)
+
+trump_glove_results_wt = glove_modeling(trump_toks_feats, 300, 5, "weighted", 12)
+
+biden_glove_results_wt = glove_modeling(biden_toks_feats, 300, 5, "weighted", 12)
+
+saveRDS(obama_1_glove_results_wt, file = "glove_models/obama_1_glove_results_wt.rds")
+saveRDS(obama_2_glove_results_wt, file = "glove_models/obama_2_glove_results_wt.rds")
+saveRDS(bush_1_glove_results_wt, file = "glove_models/bush_1_glove_results_wt.rds")
+saveRDS(bush_2_glove_results_wt, file = "glove_models/bush_2_glove_results_wt.rds")
+saveRDS(trump_glove_results_wt, file = "glove_models/trump_glove_results_wt.rds")
+saveRDS(biden_glove_results_wt, file = "glove_models/biden_glove_results_wt.rds")
+
+```
+
+
+loading pretrained globe model as comparison
+```{r}
+
+# ---------- 1. Prepare the pretrained embedding
+
+# Download Glove here: GloVe pretrained (https://nlp.stanford.edu/projects/glove/)
+# data table is faster than read_delim
+#file is glove model trained on 6 billion words in 300 dimensions
+glove_wts <- data.table::fread("glove.6B.300d.txt", quote = "", data.table = FALSE) %>% 
+  as_tibble()
+
+# convert to matrix
+glove_matrix <- as.matrix(glove_wts %>% select(-V1))
+
+# add names
+rownames(glove_matrix) <- glove_wts$V1
+
+# check object
+#head(glove_matrix)
+dim(glove_matrix)
+#glove_matrix["war", ]
+
+```
+
+comparing results
+```{r}
+
+#finding nearest neighbor words based on cosine similarity
+
+
+
+bush1_data_embedding = find_nearest("data", bush_1_glove_results, 20, "Bush-1")
+bush2_data_embedding = find_nearest("data", bush_2_glove_results, 20, "Bush-2")
+obama1_data_embedding = find_nearest("data", obama_1_glove_results, 20, "Obama-1")
+obama2_data_embedding = find_nearest("data", obama_2_glove_results, 20, "Obama-2")
+trump_data_embedding = find_nearest("data", trump_glove_results, 20, "Trump")
+biden_data_embedding = find_nearest("data", biden_glove_results, 20, "Biden")
+glove_data_embedding = find_nearest("data", glove_matrix, 20, "Glove")
+
+all_terms_data_embedding = cbind(bush1_data_embedding, bush2_data_embedding, obama1_data_embedding,
+                                 obama2_data_embedding, trump_data_embedding, biden_data_embedding, 
+                                 glove_data_embedding)
+
+write.csv(all_terms_data_embedding, "results/pterm_data_nn.csv", row.names = FALSE)
+
+bush1_eval_embedding = find_nearest("evaluation", bush_1_glove_results, 20, "Bush-1")
+bush2_eval_embedding = find_nearest("evaluation", bush_2_glove_results, 20, "Bush-2")
+obama1_eval_embedding = find_nearest("evaluation", obama_1_glove_results, 20, "Obama-1")
+obama2_eval_embedding = find_nearest("evaluation", obama_2_glove_results, 20, "Obama-2")
+trump_eval_embedding = find_nearest("evaluation", trump_glove_results, 20, "Trump")
+biden_eval_embedding = find_nearest("evaluation", biden_glove_results, 20, "Biden")
+glove_eval_embedding = find_nearest("evaluation", glove_matrix, 20, "Glove")
+
+all_terms_eval_embedding = cbind(bush1_eval_embedding, bush2_eval_embedding, obama1_eval_embedding,
+                                 obama2_eval_embedding, trump_eval_embedding, biden_eval_embedding, 
+                                 glove_eval_embedding)
+
+write.csv(all_terms_eval_embedding, "results/pterm_eval_nn.csv", row.names = FALSE)
+
+bush1_analysis_embedding = find_nearest("analysis", bush_1_glove_results, 20, "Bush-1")
+bush2_analysis_embedding = find_nearest("analysis", bush_2_glove_results, 20, "Bush-2")
+obama1_analysis_embedding = find_nearest("analysis", obama_1_glove_results, 20, "Obama-1")
+obama2_analysis_embedding = find_nearest("analysis", obama_2_glove_results, 20, "Obama-2")
+trump_analysis_embedding = find_nearest("analysis", trump_glove_results, 20, "Trump")
+biden_analysis_embedding = find_nearest("analysis", biden_glove_results, 20, "Biden")
+glove_analysis_embedding = find_nearest("analysis", glove_matrix, 20, "Glove")
+
+all_terms_analysis_embedding = cbind(bush1_analysis_embedding, bush2_analysis_embedding, obama1_analysis_embedding,
+                                 obama2_analysis_embedding, trump_analysis_embedding, biden_analysis_embedding, 
+                                 glove_analysis_embedding)
+
+write.csv(all_terms_analysis_embedding, "results/pterm_analysis_nn.csv", row.names = FALSE)
+
+
+bush1_eff_embedding = find_nearest("efficiency", bush_1_glove_results, 20, "Bush-1")
+bush2_eff_embedding = find_nearest("efficiency", bush_2_glove_results, 20, "Bush-2")
+obama1_eff_embedding = find_nearest("efficiency", obama_1_glove_results, 20, "Obama-1")
+obama2_eff_embedding = find_nearest("efficiency", obama_2_glove_results, 20, "Obama-2")
+trump_eff_embedding = find_nearest("efficiency", trump_glove_results, 20, "Trump")
+biden_eff_embedding = find_nearest("efficiency", biden_glove_results, 20, "Biden")
+glove_eff_embedding = find_nearest("efficiency", glove_matrix, 20, "Glove")
+
+all_terms_eff_embedding = cbind(bush1_eff_embedding, bush2_eff_embedding, obama1_eff_embedding,
+                                 obama2_eff_embedding, trump_eff_embedding, biden_eff_embedding, 
+                                 glove_eff_embedding)
+
+write.csv(all_terms_eff_embedding, "results/pterm_efficiency_nn.csv", row.names = FALSE)
+```
+
+weighted versions of embedding model
+
+```{r}
+
+bush1_data_embedding_wt = find_nearest("data", bush_1_glove_results_wt, 20, "Bush-1")
+bush2_data_embedding_wt = find_nearest("data", bush_2_glove_results_wt, 20, "Bush-2")
+obama1_data_embedding_wt = find_nearest("data", obama_1_glove_results_wt, 20, "Obama-1")
+obama2_data_embedding_wt = find_nearest("data", obama_2_glove_results_wt, 20, "Obama-2")
+trump_data_embedding_wt = find_nearest("data", trump_glove_results_wt, 20, "Trump")
+biden_data_embedding_wt = find_nearest("data", biden_glove_results_wt, 20, "Biden")
+glove_data_embedding = find_nearest("data", glove_matrix, 20, "Glove")
+
+all_terms_data_embedding_wt = cbind(bush1_data_embedding_wt, bush2_data_embedding_wt, obama1_data_embedding_wt,
+                                 obama2_data_embedding_wt, trump_data_embedding_wt, biden_data_embedding_wt, 
+                                 glove_data_embedding)
+
+write.csv(all_terms_data_embedding_wt, "results/pterm_data_nn_weighted.csv", row.names = FALSE)
+
+bush1_eval_embedding_wt = find_nearest("evaluation", bush_1_glove_results_wt, 20, "Bush-1")
+bush2_eval_embedding_wt = find_nearest("evaluation", bush_2_glove_results_wt, 20, "Bush-2")
+obama1_eval_embedding_wt = find_nearest("evaluation", obama_1_glove_results_wt, 20, "Obama-1")
+obama2_eval_embedding_wt = find_nearest("evaluation", obama_2_glove_results_wt, 20, "Obama-2")
+trump_eval_embedding_wt = find_nearest("evaluation", trump_glove_results_wt, 20, "Trump")
+biden_eval_embedding_wt = find_nearest("evaluation", biden_glove_results_wt, 20, "Biden")
+glove_eval_embedding = find_nearest("evaluation", glove_matrix, 20, "Glove")
+
+all_terms_eval_embedding_wt = cbind(bush1_eval_embedding_wt, bush2_eval_embedding_wt, obama1_eval_embedding_wt,
+                                 obama2_eval_embedding_wt, trump_eval_embedding_wt, biden_eval_embedding_wt, 
+                                 glove_eval_embedding)
+
+write.csv(all_terms_eval_embedding_wt, "results/pterm_eval_nn_weighted.csv", row.names = FALSE)
+
+bush1_analysis_embedding_wt = find_nearest("analysis", bush_1_glove_results_wt, 20, "Bush-1")
+bush2_analysis_embedding_wt = find_nearest("analysis", bush_2_glove_results_wt, 20, "Bush-2")
+obama1_analysis_embedding_wt = find_nearest("analysis", obama_1_glove_results_wt, 20, "Obama-1")
+obama2_analysis_embedding_wt = find_nearest("analysis", obama_2_glove_results_wt, 20, "Obama-2")
+trump_analysis_embedding_wt = find_nearest("analysis", trump_glove_results_wt, 20, "Trump")
+biden_analysis_embedding_wt = find_nearest("analysis", biden_glove_results_wt, 20, "Biden")
+glove_analysis_embedding = find_nearest("analysis", glove_matrix, 20, "Glove")
+
+all_terms_analysis_embedding_wt = cbind(bush1_analysis_embedding_wt, bush2_analysis_embedding_wt, obama1_analysis_embedding_wt,
+                                 obama2_analysis_embedding_wt, trump_analysis_embedding_wt, biden_analysis_embedding_wt, 
+                                 glove_analysis_embedding)
+
+write.csv(all_terms_analysis_embedding_wt, "results/pterm_analysis_nn_weighted.csv", row.names = FALSE)
+
+bush1_eff_embedding_wt = find_nearest("efficiency", bush_1_glove_results_wt, 20, "Bush-1")
+bush2_eff_embedding_wt = find_nearest("efficiency", bush_2_glove_results_wt, 20, "Bush-2")
+obama1_eff_embedding_wt = find_nearest("efficiency", obama_1_glove_results_wt, 20, "Obama-1")
+obama2_eff_embedding_wt = find_nearest("efficiency", obama_2_glove_results_wt, 20, "Obama-2")
+trump_eff_embedding_wt = find_nearest("efficiency", trump_glove_results_wt, 20, "Trump")
+biden_eff_embedding_wt = find_nearest("efficiency", biden_glove_results_wt, 20, "Biden")
+glove_eff_embedding = find_nearest("efficiency", glove_matrix, 20, "Glove")
+
+all_terms_eff_embedding_wt = cbind(bush1_eff_embedding_wt, bush2_eff_embedding_wt, obama1_eff_embedding_wt,
+                                 obama2_eff_embedding_wt, trump_eff_embedding_wt, biden_eff_embedding_wt, 
+                                 glove_eff_embedding)
+
+write.csv(all_terms_eff_embedding_wt, "results/pterm_efficiency_nn_weighted.csv", row.names = FALSE)
+
+```
+
+### party level analysis
+
+```{r}
+
+#by party
+
+republican_corpus <- corpus_subset(fed_corpus, pres_party == "republican")
+democrat_corpus <- corpus_subset(fed_corpus, pres_party == "democrat")
+
+```
+
+## looking at unigrams - no bigrams in model 
+```{r}
+
+dem_toks_feats = prepping_tokens_we(democrat_corpus, remove_words, 5, 0.99)
+rep_toks_feats = prepping_tokens_we(republican_corpus, remove_words, 5, 0.99)
+
+saveRDS(dem_toks_feats, file = "token_files/dem_toks_feats.rds")
+saveRDS(rep_toks_feats, file = "token_files/rep_toks_feats.rds")
+
+#dem_toks_feats = readRDS("token_files/dem_toks_feats.rds")
+#rep_toks_feats = readRDS("token_files/rep_toks_feats.rds")
+
+dem_glove_results = glove_modeling(dem_toks_feats, 300, 5, "frequency", 12)
+rep_glove_results = glove_modeling(rep_toks_feats, 300, 5, "frequency",  12)
+
+dem_glove_results_wt = glove_modeling(dem_toks_feats, 300, 5, "weighted", 12)
+rep_glove_results_wt = glove_modeling(rep_toks_feats, 300, 5, "weighted",  12)
+
+saveRDS(dem_glove_results, file = "glove_models/dem_glove_results.rds")
+saveRDS(rep_glove_results, file = "glove_models/rep_glove_results.rds")
+saveRDS(dem_glove_results_wt, file = "glove_models/dem_glove_results_wt.rds")
+saveRDS(rep_glove_results_wt, file = "glove_models/rep_glove_results_wt.rds")
+
+
+
+
+```
+
+```{r}
+
+#data
+dem_data_embedding = find_nearest("data", dem_glove_results, 20, "Dem")
+rep_data_embedding = find_nearest("data", rep_glove_results, 20, "Rep")
+
+dem_data_embedding_wt = find_nearest("data", dem_glove_results_wt, 20, "Dem-WT")
+rep_data_embedding_wt = find_nearest("data", rep_glove_results_wt, 20, "Rep-WT")
+
+party_data_embedding = cbind(dem_data_embedding, rep_data_embedding, dem_data_embedding_wt, rep_data_embedding_wt)
+
+write.csv(party_data_embedding, "results/party_data_nn.csv", row.names = FALSE)
+
+#eval
+dem_eval_embedding = find_nearest("evaluation", dem_glove_results, 20, "Dem")
+rep_eval_embedding = find_nearest("evaluation", rep_glove_results, 20, "Rep")
+
+dem_eval_embedding_wt = find_nearest("evaluation", dem_glove_results_wt, 20, "Dem-WT")
+rep_eval_embedding_wt = find_nearest("evaluation", rep_glove_results_wt, 20, "Rep-WT")
+
+party_eval_embedding = cbind(dem_eval_embedding, rep_eval_embedding, dem_eval_embedding_wt, rep_eval_embedding_wt)
+
+write.csv(party_eval_embedding, "results/party_eval_nn.csv", row.names = FALSE)
+
+
+#efficiency
+
+dem_eff_embedding = find_nearest("efficiency", dem_glove_results, 20, "Dem")
+rep_eff_embedding = find_nearest("efficiency", rep_glove_results, 20, "Rep")
+
+dem_eff_embedding_wt = find_nearest("efficiency", dem_glove_results_wt, 20, "Dem-WT")
+rep_eff_embedding_wt = find_nearest("efficiency", rep_glove_results_wt, 20, "Rep-WT")
+
+party_eff_embedding = cbind(dem_eff_embedding, rep_eff_embedding, dem_eff_embedding_wt, rep_eff_embedding_wt)
+
+write.csv(party_eff_embedding, "results/party_eff_nn.csv", row.names = FALSE)
+
+#analysis
+
+dem_analysis_embedding = find_nearest("analysis", dem_glove_results, 20, "Dem")
+rep_analysis_embedding = find_nearest("analysis", rep_glove_results, 20, "Rep")
+
+dem_analysis_embedding_wt = find_nearest("analysis", dem_glove_results_wt, 20, "Dem-WT")
+rep_analysis_embedding_wt = find_nearest("analysis", rep_glove_results_wt, 20, "Rep-WT")
+
+party_analysis_embedding = cbind(dem_analysis_embedding, rep_analysis_embedding, dem_analysis_embedding_wt, rep_analysis_embedding_wt)
+
+write.csv(party_analysis_embedding, "results/party_analysis_nn.csv", row.names = FALSE)
+
+#ai - results are not meaningful/related to fish
+dem_ai_embedding = find_nearest("ai", dem_glove_results, 20, "Dem")
+rep_ai_embedding = find_nearest("ai", rep_glove_results, 20, "Rep")
+
+dem_ai_embedding_wt = find_nearest("ai", dem_glove_results_wt, 20, "Dem-WT")
+rep_ai_embedding_wt = find_nearest("ai", rep_glove_results_wt, 20, "Rep-WT")
+
+party_ai_embedding = cbind(dem_ai_embedding, rep_ai_embedding, dem_ai_embedding_wt, rep_ai_embedding_wt)
+
+
+```
+
+## adding bigrams to tokens used in word embedding model
+
+```{r}
+
+prepping_tokens_we_bigrams = function(c, words_to_remove, mtf, mdf, bigrams){
+  t = tokens(c, what = "word", remove_punct = TRUE, remove_numbers = TRUE, remove_symbols = TRUE, remove_separators = TRUE) %>% tokens_tolower() %>% tokens_remove(pattern = junk_patterns, valuetype = "regex") %>% tokens_compound(pattern = bigrams)
+  f = dfm(t, verbose = FALSE) %>% 
+  dfm_remove(c(stopwords(language = "en"), words_to_remove)) %>% 
+  dfm_trim(min_termfreq = mtf, termfreq_type = "count", max_docfreq = mdf, docfreq_type = "prop") %>%
+  featnames() 
+  
+  tokens_pad = tokens_select(t,
+                            f,
+                            padding = TRUE)
+  return(tokens_pad)
+}
+
+custom_bigrams <- phrase(c("data analysis", 
+                           "data collection",
+                           "program evaluation",
+                           "performance evaluation",
+                           "artificial intelligence",
+                           "fuel efficiency",
+                           "energy efficiency"))
+
+dem_toks_feats_bigrams = prepping_tokens_we_bigrams(democrat_corpus, remove_words, 5, 0.99, custom_bigrams)
+rep_toks_feats_bigrams = prepping_tokens_we_bigrams(republican_corpus, remove_words, 5, 0.99, custom_bigrams)
+
+saveRDS(dem_toks_feats_bigrams, file = "token_files/dem_toks_feats_bigrams.rds")
+saveRDS(rep_toks_feats_bigrams, file = "token_files/rep_toks_feats_bigrams.rds")
+
+#dem_toks_feats_bigrams= readRDS("token_files/dem_toks_feats_bigrams.rds")
+#rep_toks_feats_bigrams = readRDS("token_files/rep_toks_feats_bigrams.rds")
+
+
+dem_glove_results_bigrams = glove_modeling(dem_toks_feats_bigrams, 300, 5, "frequency", 10)
+rep_glove_results_bigrams = glove_modeling(rep_toks_feats_bigrams, 300, 5, "frequency",  10)
+
+saveRDS(dem_glove_results_bigrams, file = "glove_models/dem_glove_results_bigrams.rds")
+saveRDS(rep_glove_results_bigrams, file = "glove_models/rep_glove_results_bigrams.rds")
+
+dem_glove_results_bigrams_wt = glove_modeling(dem_toks_feats_bigrams, 300, 5, "weighted", 10)
+rep_glove_results_bigrams_wt = glove_modeling(rep_toks_feats_bigrams, 300, 5, "weighted",  10)
+
+
+saveRDS(dem_glove_results_bigrams_wt, file = "glove_models/dem_glove_results_bigrams_wt.rds")
+saveRDS(rep_glove_results_bigrams_wt, file = "glove_models/rep_glove_results_bigrams_wt.rds")
+
+
+```
+
+```{r}
+
+dem_data_embedding_bigrams = find_nearest("data", dem_glove_results_bigrams, 20, "Dem_data")
+rep_data_embedding_bigrams = find_nearest("data", rep_glove_results_bigrams, 20, "Rep_data")
+
+dem_analysis_embedding_bigrams = find_nearest("analysis", dem_glove_results_bigrams, 20, "Dem_analysis")
+rep_analysis_embedding_bigrams = find_nearest("analysis", rep_glove_results_bigrams, 20, "Rep_analysis")
+
+dem_da_embedding_bigrams = find_nearest("data_analysis", dem_glove_results_bigrams, 20, "Dem_da")
+rep_da_embedding_bigrams = find_nearest("data_analysis", rep_glove_results_bigrams, 20, "Rep_da")
+
+dem_dc_embedding_bigrams = find_nearest("data_collection", dem_glove_results_bigrams, 20, "Dem_dc")
+rep_dc_embedding_bigrams = find_nearest("data_collection", rep_glove_results_bigrams, 20, "Rep_dc")
+
+party_da_embedding = cbind(dem_data_embedding_bigrams, rep_data_embedding_bigrams, dem_analysis_embedding_bigrams, rep_analysis_embedding_bigrams, dem_da_embedding_bigrams, rep_da_embedding_bigrams, dem_dc_embedding_bigrams, rep_dc_embedding_bigrams)
+
+write.csv(party_da_embedding, "results/party_data_embedding_bigrams.csv", row.names = FALSE)
+
+dem_eval_embedding_bigrams = find_nearest("evaluation", dem_glove_results_bigrams, 20, "Dem-eval")
+rep_eval_embedding_bigrams = find_nearest("evaluation", rep_glove_results_bigrams, 20, "Rep-eval")
+
+#dem_progeval_embedding_bigrams = find_nearest("program_evaluation", dem_glove_results_bigrams, 20, "Dem-progeval")
+#rep_progeval_embedding_bigrams = find_nearest("program_evaluation", rep_glove_results_bigrams, 20, "Rep-progeval")
+
+dem_perfeval_embedding_bigrams = find_nearest("performance_evaluation", dem_glove_results_bigrams, 20, "Dem-perfeval")
+rep_perfeval_embedding_bigrams = find_nearest("performance_evaluation", rep_glove_results_bigrams, 20, "Rep-perfeval")
+
+#program evaluation does not provide meaningful results, removing from results
+party_eval_embedding = cbind(dem_eval_embedding_bigrams, rep_eval_embedding_bigrams, dem_perfeval_embedding_bigrams, rep_perfeval_embedding_bigrams)
+
+write.csv(party_eval_embedding, "results/party_eval_embedding_bigrams.csv", row.names = FALSE)
+
+
+dem_eff_embedding_bigrams = find_nearest("efficiency", dem_glove_results_bigrams, 20, "Dem")
+rep_eff_embedding_bigrams = find_nearest("efficiency", rep_glove_results_bigrams, 20, "Rep")
+
+party_eff_embedding_nobigrams = cbind(dem_eff_embedding_bigrams, rep_eff_embedding_bigrams)
+
+write.csv(party_eff_embedding_nobigrams, "results/party_eff_embedding_nobigrams.csv", row.names = FALSE)
+
+
+dem_ai_embedding_bigrams = find_nearest("artificial_intelligence", dem_glove_results_bigrams, 20, "Dem")
+rep_ai_embedding_bigrams = find_nearest("artificial_intelligence", rep_glove_results_bigrams, 20, "Rep")
+
+party_ai_embedding = cbind(dem_ai_embedding_bigrams, rep_ai_embedding_bigrams)
+
+write.csv(party_ai_embedding , "results/party_ai_embedding.csv", row.names = FALSE)
+
+
+```
+
+weighted version
+```{r}
+
+dem_data_embedding_bigrams_wt = find_nearest("data", dem_glove_results_bigrams_wt, 20, "Dem_data_wt")
+rep_data_embedding_bigrams_wt = find_nearest("data", rep_glove_results_bigrams_wt, 20, "Rep_data_wt")
+
+dem_analysis_embedding_bigrams_wt = find_nearest("analysis", dem_glove_results_bigrams_wt, 20, "Dem_analysis_wt")
+rep_analysis_embedding_bigrams_wt = find_nearest("analysis", rep_glove_results_bigrams_wt, 20, "Rep_analysis_wt")
+
+dem_da_embedding_bigrams_wt = find_nearest("data_analysis", dem_glove_results_bigrams_wt, 20, "Dem_da_wt")
+rep_da_embedding_bigrams_wt = find_nearest("data_analysis", rep_glove_results_bigrams_wt, 20, "Rep_da_wt")
+
+dem_dc_embedding_bigrams_wt = find_nearest("data_collection", dem_glove_results_bigrams_wt, 20, "Dem_dc_wt")
+rep_dc_embedding_bigrams_wt = find_nearest("data_collection", rep_glove_results_bigrams_wt, 20, "Rep_dc_wt")
+
+party_data_embedding_wt = cbind(dem_data_embedding_bigrams_wt, rep_data_embedding_bigrams_wt, dem_analysis_embedding_bigrams_wt, rep_analysis_embedding_bigrams_wt, dem_da_embedding_bigrams_wt, rep_da_embedding_bigrams_wt, dem_dc_embedding_bigrams_wt, rep_dc_embedding_bigrams_wt)
+
+write.csv(party_data_embedding_wt, "results/party_data_embedding_bigrams_wt.csv", row.names = FALSE)
+
+dem_eval_embedding_bigrams_wt = find_nearest("evaluation", dem_glove_results_bigrams_wt, 20, "Dem-eval-wt")
+rep_eval_embedding_bigrams_wt = find_nearest("evaluation", rep_glove_results_bigrams_wt, 20, "Rep-eval-wt")
+
+#dem_progeval_embedding_bigrams_wt = find_nearest("program_evaluation", dem_glove_results_bigrams_wt, 20, "Dem-progeval")
+#rep_progeval_embedding_bigrams_wt = find_nearest("program_evaluation", rep_glove_results_bigrams_wt, 20, "Rep-progeval")
+
+dem_perfeval_embedding_bigrams_wt = find_nearest("performance_evaluation", dem_glove_results_bigrams_wt, 20, "Dem-perfeval-wt")
+rep_perfeval_embedding_bigrams_wt = find_nearest("performance_evaluation", rep_glove_results_bigrams_wt, 20, "Rep-perfeval-wt")
+
+#program evaluation does not provide meaningful results, removing from results
+party_eval_embedding_wt = cbind(dem_eval_embedding_bigrams_wt, rep_eval_embedding_bigrams_wt, dem_perfeval_embedding_bigrams_wt, rep_perfeval_embedding_bigrams_wt)
+
+write.csv(party_eval_embedding_wt, "results/party_eval_embedding_bigrams_wt.csv", row.names = FALSE)
+
+
+dem_eff_embedding_bigrams_wt = find_nearest("efficiency", dem_glove_results_bigrams_wt, 20, "Dem-wt")
+rep_eff_embedding_bigrams_wt = find_nearest("efficiency", rep_glove_results_bigrams_wt, 20, "Rep-wt")
+
+party_eff_embedding_nobigrams_wt = cbind(dem_eff_embedding_bigrams_wt, rep_eff_embedding_bigrams_wt)
+
+write.csv(party_eff_embedding_nobigrams_wt, "results/party_eff_embedding_nobigrams_wt.csv", row.names = FALSE)
+
+
+dem_ai_embedding_bigrams_wt = find_nearest("artificial_intelligence", dem_glove_results_bigrams_wt, 20, "Dem-wt")
+rep_ai_embedding_bigrams_wt = find_nearest("artificial_intelligence", rep_glove_results_bigrams_wt, 20, "Rep-wt")
+
+party_ai_embedding_wt = cbind(dem_ai_embedding_bigrams_wt, rep_ai_embedding_bigrams_wt)
+
+write.csv(party_ai_embedding_wt , "results/party_ai_embedding_wt.csv", row.names = FALSE)
+
+
+```
+
+
+combining results:
+
+```{r}
+
+party_da_embedding_v2 = cbind(party_da_embedding, party_data_embedding_wt)
+
+party_eff_embedding_nobigrams_v2 = cbind(party_eff_embedding_nobigrams, party_eff_embedding_nobigrams_wt)
+
+party_eval_embedding_v2 = cbind(party_eval_embedding, party_eval_embedding_wt)
+
+party_ai_embedding_v2 = cbind(party_ai_embedding, party_ai_embedding_wt)
+
+
+write.csv(party_da_embedding_v2, "results/party_da_embedding_v2.csv", row.names = FALSE)
+write.csv(party_eff_embedding_nobigrams_v2, "results/party_eff_embedding_nobigrams_v2.csv", row.names = FALSE)
+write.csv(party_eval_embedding_v2, "results/party_eval_embedding_v2.csv", row.names = FALSE)
+write.csv(party_ai_embedding_v2, "results_party_ai_embedding_v2.csv", row.names = FALSE)
+
+```
+
+Full Corpus
+
+unable to create Glove model - not enough memory for full corpus
+
+```{r}
+
+fed_corpus_tokens = readRDS("token_files/fed_corpus_tokens.rds")
+
+fed_corpus_tok_dfm = fed_corpus_tokens %>% dfm() %>% dfm_remove(c(stopwords(language = "en"), remove_words)) %>% dfm_trim(min_termfreq = 20, termfreq_type = "count",max_docfreq = 0.99, docfreq_type = "prop") %>% featnames()
+
+fed_tokens_pad = tokens_select(fed_corpus_tokens,
+                            fed_corpus_tok_dfm,
+                            padding = TRUE)
+
+#fed_glove_results = glove_modeling(fed_tokens_pad, 200, 5, "frequency", 12)
+
+```
